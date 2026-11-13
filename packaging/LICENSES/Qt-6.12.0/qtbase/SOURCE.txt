@@ -1,0 +1,3 @@
+Qt qtbase v6.12.0 license texts
+Retrieved from https://github.com/qt/qtbase/tree/v6.12.0/LICENSES
+API: https://api.github.com/repos/qt/qtbase/contents/LICENSES?ref=v6.12.0

@@ -1,0 +1,2 @@
+Qt qtvirtualkeyboard v6.12.0 license texts
+Retrieved from https://github.com/qt/qtvirtualkeyboard/tree/v6.12.0/LICENSES

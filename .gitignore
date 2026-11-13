@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and OS metadata
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Local captures, diagnostics and settings
+captures/
+diag/
+*.log
+*.jsonl
+LagLens.ini
+stdout_test.txt
+*.bak
+*.tmp
+
+# Build output and release artifacts
+build/
+dist/
+*.zip
+*.sha256
+
+# Local secrets / certificates (never commit)
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+secrets.*
+
+# Local executables and binaries from ad-hoc builds
+*.exe

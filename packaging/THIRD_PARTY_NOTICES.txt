@@ -1,0 +1,98 @@
+LagLens v0.1.0 — Third-Party Notices
+=====================================
+
+LagLens itself is licensed under the MIT License. See LICENSE.
+
+This distribution includes the following third-party components.
+
+Runtime components
+------------------
+
+1. Qt / PySide6 / shiboken6 6.12.0
+   Copyright (C) The Qt Company Ltd. and contributors.
+   License: LGPL-3.0-only (also offered upstream under GPL and commercial
+   terms; this distribution relies on the LGPL option).
+   Project: https://pyside.org / https://www.qt.io/
+   License text: LICENSES/LGPL-3.0.txt
+
+   The Qt libraries are shipped as separate, replaceable DLLs/plugins in
+   the application directory. LagLens does not modify Qt. Users may replace
+   the Qt libraries with compatible builds, subject to the LGPL.
+
+   Qt/PySide6 source:
+   https://code.qt.io/cgit/qt/
+   https://code.qt.io/cgit/pyside/pyside-setup.git/
+
+   Qt includes third-party components. License texts retrieved from the
+   official Qt v6.12.0 repositories are in LICENSES/Qt-6.12.0/. The
+   authoritative component list is:
+   https://doc.qt.io/qt-6/licenses-used-in-qt.html
+
+   The shipped Qt PDF module is built from Qt WebEngine sources and
+   includes PDFium/Chromium-family components. See the Qt documentation
+   link above for the complete list; a legal review of the Qt PDF notice
+   bundle is recommended before a public binary release.
+
+2. psutil 7.2.2
+   Copyright (c) 2009, Jay Loden, Dave Daeschler, Giampaolo Rodola.
+   License: BSD-3-Clause.
+   Project: https://github.com/giampaolo/psutil
+   License text: LICENSES/BSD-3-Clause-psutil.txt
+
+3. nvidia-ml-py 13.615.71 (imported as pynvml)
+   Copyright (c) 2011-2025, NVIDIA Corporation.
+   License: BSD-3-Clause.
+   Project: https://forums.developer.nvidia.com
+   License text: LICENSES/BSD-3-Clause-nvidia-ml-py.txt
+
+   This package provides Python bindings to the NVIDIA Management Library.
+   It does not bundle the NVML driver/library itself.
+
+4. Python 3.12 runtime
+   Copyright (c) Python Software Foundation.
+   License: Python Software Foundation License.
+   Project: https://www.python.org/
+   License text: LICENSES/PSF-Python.txt
+
+   The Python notice also covers bundled components such as OpenSSL,
+   libffi, bzip2, liblzma and the zlib-related notices where applicable.
+
+5. OpenSSL 3.0.15 runtime
+   Copyright (c) 1998-2025 The OpenSSL Project.
+   License: Apache-2.0.
+   Project: https://www.openssl.org/
+   License text: LICENSES/Apache-2.0.txt
+
+   The libcrypto-3.dll and libssl-3.dll runtime DLLs are shipped with the
+   Python runtime. LagLens does not expose network features.
+
+6. Microsoft Visual C++ runtime
+   VCRUNTIME140.dll, VCRUNTIME140_1.dll and MSVCP140*.dll are
+   redistributed as part of the Python/PySide6 runtime under Microsoft's
+   Visual Studio redistributable terms. See:
+   https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+
+7. PresentMon 2.6.0 (x64)
+   Copyright (C) 2017-2024 Intel Corporation.
+   License: MIT.
+   Project: https://github.com/GameTechDev/PresentMon
+   License text: presentmon/LICENSE.txt and LICENSES/MIT-PresentMon.txt
+   SHA-256:
+   B2A706BC6AD475749E3B7E3409263AA1E6906D45BDCF993F6DBC0F660188F1AF
+
+Build-time components
+---------------------
+
+8. PyInstaller 6.16.0 and pyinstaller-hooks-contrib 2026.10
+   The PyInstaller bootloader is distributed inside the application
+   executable. PyInstaller is used under its GPL-2.0-or-later license with
+   the special exception permitting distribution of bundled applications.
+   Project: https://pyinstaller.org/
+   License text: LICENSES/PyInstaller.txt
+
+Other build-only packages (altgraph, pefile, packaging, setuptools,
+pywin32-ctypes) are used to produce the executable and are not intended as
+runtime components of the distributed application.
+
+No license text in this distribution grants rights to the LagLens name,
+game captures, or third-party game assets.

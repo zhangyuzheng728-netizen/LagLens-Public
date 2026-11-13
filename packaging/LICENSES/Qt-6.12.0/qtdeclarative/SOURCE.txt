@@ -1,0 +1,3 @@
+Qt qtdeclarative v6.12.0 license texts
+Retrieved from https://github.com/qt/qtdeclarative/tree/v6.12.0/LICENSES
+API: https://api.github.com/repos/qt/qtdeclarative/contents/LICENSES?ref=v6.12.0
