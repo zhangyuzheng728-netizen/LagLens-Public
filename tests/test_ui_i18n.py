@@ -79,6 +79,7 @@ class UiI18nTests(unittest.TestCase):
             gpu,
             settings=self.settings,
         )
+        self.window.analysis_async = False
 
         self.window.timer.stop()
         self.window.auto_analyze.setChecked(False)
@@ -133,7 +134,14 @@ class UiI18nTests(unittest.TestCase):
                     self.window.tabs.count()
                 )
             ],
-            ["Hardware", "Live Frames", "Analysis", "Settings"],
+            [
+                "Hardware",
+                "Network",
+                "Live Frames",
+                "Analysis",
+                "AI assistant",
+                "Settings",
+            ],
         )
         self.assertEqual(
             self.window.start_btn.text(),
@@ -177,7 +185,14 @@ class UiI18nTests(unittest.TestCase):
                     self.window.tabs.count()
                 )
             ],
-            ["硬件", "实时帧", "分析报告", "设置"],
+            [
+                "硬件",
+                "网络",
+                "实时帧",
+                "分析报告",
+                "AI 助手",
+                "设置",
+            ],
         )
         self.assertEqual(
             self.window.start_btn.text(),
@@ -574,7 +589,7 @@ class UiI18nTests(unittest.TestCase):
             "简体中文",
         )
         self.assertEqual(
-            self.window.tabs.tabText(3),
+            self.window.tabs.tabText(5),
             "设置",
         )
 

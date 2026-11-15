@@ -39,3 +39,4 @@ secrets.*
 
 # Local executables and binaries from ad-hoc builds
 *.exe
+!vendor/presentmon/*.exe

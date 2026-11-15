@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import statistics
 
-from bisect import bisect_left
+from bisect import bisect_left, insort
 from dataclasses import dataclass, field, replace
 
 from frame_stats import compute_stats, percentile
@@ -658,37 +658,86 @@ def _detect_local_stutters(metrics, config):
 
     times = [item.time_ms for item in metrics]
     events = []
+    window = []
+    left = 0
+    right = 0
+    total = len(metrics)
 
     for index, item in enumerate(metrics):
 
-        left = bisect_left(
-            times,
-            item.time_ms - config.local_baseline_ms,
-        )
-        right = bisect_left(
-            times,
-            item.time_ms - config.local_baseline_gap_ms,
-        )
-        baseline = metrics[left:right]
+        high = item.time_ms - config.local_baseline_gap_ms
 
-        if len(baseline) < config.min_baseline_frames:
+        while right < total and times[right] < high:
+
+            insort(window, metrics[right].duration_ms)
+            right += 1
+
+        low = item.time_ms - config.local_baseline_ms
+
+        while left < right and times[left] < low:
+
+            value = metrics[left].duration_ms
+            position = bisect_left(window, value)
+
+            if (
+                position < len(window)
+                and window[position] == value
+            ):
+
+                window.pop(position)
+
+            else:
+
+                # Defensive fallback; should not happen with exact floats.
+                try:
+
+                    window.remove(value)
+
+                except ValueError:
+
+                    pass
+
+            left += 1
+
+        count = len(window)
+
+        if count < config.min_baseline_frames:
 
             continue
 
-        durations = [
-            base.duration_ms for base in baseline
-        ]
-        median = statistics.median(durations)
-        deviations = sorted(
-            abs(value - median)
-            for value in durations
+        middle = count // 2
+
+        if count % 2:
+
+            median = window[middle]
+
+        else:
+
+            median = (
+                window[middle - 1] + window[middle]
+            ) / 2.0
+
+        base_threshold = max(
+            median * config.local_stutter_ratio,
+            config.local_stutter_floor_ms,
         )
-        mad = statistics.median(deviations)
+
+        # The MAD term can only raise the threshold.  Most frames are
+        # below the ratio/floor part, so skip the deviation sort for them.
+        if item.duration_ms <= base_threshold:
+
+            continue
+
+        deviations = sorted(
+            abs(value - median) for value in window
+        )
+        mad = deviations[middle] if count % 2 else (
+            deviations[middle - 1] + deviations[middle]
+        ) / 2.0
         robust_sigma = 1.4826 * mad
         threshold = max(
-            median * config.local_stutter_ratio,
+            base_threshold,
             median + config.local_stutter_mad_k * robust_sigma,
-            config.local_stutter_floor_ms,
         )
 
         if item.duration_ms > threshold:

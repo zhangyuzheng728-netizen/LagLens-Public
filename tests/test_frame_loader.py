@@ -77,8 +77,8 @@ class LoadFramesTests(unittest.TestCase):
     def test_sequential_swap_chains_are_merged(self):
         """A recreated swap chain must not hide the other frames.
 
-        A player can recreate its swap chain when switching videos, so a
-        capture may contain several chains one after another.
+        Douyin recreates its swap chain when switching videos, so a
+        60 s capture contains several chains one after another.
         """
 
         with tempfile.TemporaryDirectory() as folder:

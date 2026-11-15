@@ -175,6 +175,40 @@ class UiThemeTests(unittest.TestCase):
             chart.deleteLater()
             self.app.processEvents()
 
+    def test_frame_chart_downsamples_but_keeps_the_peak(self):
+
+        frames = [
+            {
+                "time": index * 16.0,
+                "duration": 16.0,
+            }
+            for index in range(5000)
+        ]
+        frames[2500]["duration"] = 500.0
+        chart = FrameChart(frames, 50.0)
+
+        try:
+
+            chart.resize(900, 320)
+            image = QImage(
+                900,
+                320,
+                QImage.Format.Format_ARGB32,
+            )
+            image.fill(QColor("#0B0F10"))
+            chart.render(image)
+
+            self.assertLessEqual(len(chart.points), 1000)
+            self.assertIn(0, chart.point_frames)
+            self.assertIn(4999, chart.point_frames)
+            self.assertIn(2500, chart.point_frames)
+            self.assertEqual(len(chart.frames), 5000)
+
+        finally:
+
+            chart.deleteLater()
+            self.app.processEvents()
+
     def test_frame_chart_renders_with_font_metrics(self):
 
         frames = [

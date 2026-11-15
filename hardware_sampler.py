@@ -668,9 +668,17 @@ class HardwareSampler:
         monotonic_ns=None,
         wall_ns=None,
         writer_factory=None,
+        session_id="",
+        origin_monotonic_ns=None,
     ):
 
         self.csv_path = Path(csv_path)
+        self.session_id = str(session_id or "")
+        self._origin_monotonic_ns = (
+            None
+            if origin_monotonic_ns is None
+            else int(origin_monotonic_ns)
+        )
         self.target_name = (target_name or "").strip()
         self.interval_s = max(0.05, float(interval_s))
         self.low_overhead = bool(low_overhead)
@@ -778,7 +786,11 @@ class HardwareSampler:
 
             return True
 
-        self._started_monotonic_ns = self._monotonic_ns()
+        self._started_monotonic_ns = (
+            self._origin_monotonic_ns
+            if self._origin_monotonic_ns is not None
+            else self._monotonic_ns()
+        )
         self._started_wall_ns = self._wall_ns()
 
         try:
@@ -803,6 +815,7 @@ class HardwareSampler:
                 "csv_name": self.csv_path.name,
                 "target_name": self.target_name,
                 "profile": self.profile,
+                "session_id": self.session_id,
                 "started_monotonic_ns": (
                     self._started_monotonic_ns
                 ),

@@ -17,13 +17,13 @@ local frame-time capture and evidence-based diagnostics.
 
 ```powershell
 git clone <your-fork-url>
-cd LagLens-Public
+cd LagLens
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -t .
 ```
 
-For packaging work, first download the [PresentMon CLI](vendor/presentmon/README.md):
+For packaging work:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt

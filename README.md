@@ -11,16 +11,16 @@ likely CPU, GPU, memory, presentation or data-quality problems based on
 the captured evidence. It cannot guarantee that every stutter has been
 found, and it does not change games, drivers or Windows settings.
 
-Version **0.1.0** (source preview).
+Version **0.1.0** (pre-release).
 
 [简体中文](README_zh-CN.md) · [Changelog](CHANGELOG.md) ·
 [Contributing](CONTRIBUTING.md) · [Third-party notices](packaging/THIRD_PARTY_NOTICES.txt)
 
-![LagLens diagnostic report](docs/screenshots/report-en.png)
+![LagLens Analysis tab](captures/analysis_inline_en.png)
 
 ## What it does
 
-- Captures frame timing locally with the optional PresentMon 2.6.0 CLI.
+- Captures frame timing locally with the bundled PresentMon 2.6.0.
 - Shows live frame time, FPS and frame-time statistics while recording.
 - Saves a CSV capture plus an optional telemetry sidecar for later
   analysis.
@@ -32,27 +32,48 @@ Version **0.1.0** (source preview).
   progress tracking.
 - Exports the current analysis as Markdown or JSON.
 - Keeps recent captures and settings locally; there is no cloud upload,
-  account, telemetry upload or network sync.
+  account, telemetry upload or background network sync. The optional AI
+  insight sends a small local summary to DeepSeek only after you click
+  the button and provide an API key. The optional AI assistant is a
+  top-level tab in the main window with continuous follow-up about the
+  explicitly linked report.
+- Limits AI answers with a local evidence layer: scenario detection with
+  a manual override, data-quality checks, stable fact IDs, evidence
+  strength and allowed conclusions. Video playback and unknown scenarios
+  cannot be concluded as a local performance problem, and an answer that
+  cites an unknown fact, a wrong number or an unsupported conclusion is
+  repaired once and otherwise replaced by the local fact summary.
+- The default AI question asks for a full assessment (is anything wrong,
+  possible causes, is optimization needed) instead of forcing a choice
+  between network and local performance. Optional prompts cover
+  smoothness, hardware, network and optimization.
 
 ## What it does not do
 
 - It does not prove a root cause or guarantee a fix.
 - It does not automatically change game settings, drivers, BIOS or
   Windows settings.
-- It does not provide network diagnostics, automatic A/B testing, cloud
-  analysis or AI-generated diagnoses.
+- It does not provide network diagnostics, automatic A/B testing or
+  cloud-stored analysis. The optional AI insight is a plain-language
+  reading of local facts, not a diagnosis, and it cannot identify a root
+  cause. Its conclusions are constrained by the local evidence layer;
+  “not enough evidence” is a valid answer.
 - It does not support every game engine, overlay, capture method or
   abnormal display configuration.
 
 ## Features
 
-- Single main window with **Hardware**, **Live Frames**, **Analysis** and
-  **Settings** pages.
+- Single main window with **Hardware**, **Network**, **Live Frames**,
+  **Analysis**, **AI assistant** and **Settings** pages.
 - Embedded Analysis page with frame-time chart, statistics, a complete
   inline diagnostic report, grouped findings, expandable evidence, event
   table, C-4 guide and optional report export.
 - Analyze Last Capture, recent captures, automatic post-capture analysis
   and Open CSV all use the same Analysis page.
+- The Analysis header can switch to another completed capture in place:
+  the in-window switcher lists recent reports newest first with program,
+  capture time, duration and data status, and never starts a new capture
+  or calls AI.
 - Re-check prefills the target on the Live Frames page, verifies that the
   process is currently running, and never starts a capture automatically.
 - English and Simplified Chinese UI switching at runtime.
@@ -63,13 +84,13 @@ Version **0.1.0** (source preview).
 
 ## Screenshots
 
-The screenshots show the app analyzing a synthetic sample, not a real user recording.
-
-| English | 简体中文 |
+| Analysis (English) | Analysis (Chinese) |
 |---|---|
-| [Analysis overview](docs/screenshots/analysis-en.png) | [分析概览](docs/screenshots/analysis-zh.png) |
+| ![Analysis EN](captures/ui4_analysis_en.png) | ![Analysis ZH](captures/ui4_analysis_zh.png) |
 
-[English diagnostic report](docs/screenshots/report-en.png)
+More screenshots: [live onboarding](captures/ux4_live_onboarding_en.png),
+[plain-language diagnosis](captures/ux4_plain_en.png),
+[technical evidence](captures/ux4_technical_en.png).
 
 ## Requirements
 
@@ -78,15 +99,20 @@ The screenshots show the app analyzing a synthetic sample, not a real user recor
   **Performance Log Users** group. PresentMon needs ETW access.
 - Optional NVIDIA GPU telemetry: a compatible NVIDIA driver exposing
   NVML. Without it, the rest of LagLens still works.
-- Python 3.12 to run this source preview.
+- No Python installation is required for the ZIP build.
 
 ## Install and run
 
-No prebuilt LagLens ZIP has been published. [Run from source](#run-from-source).
-To try the Analysis page without a game or ETW capture, open the included
-synthetic `sample_capture.csv` from **Open CSV**. Download
-[the optional PresentMon CLI](vendor/presentmon/README.md) only for live
-capture or local Windows packaging.
+1. Download `LagLens-v0.1.0-win64.zip` from the release page.
+2. Extract the whole ZIP to a normal writable folder. Do not run
+   `LagLens.exe` from inside the ZIP.
+3. Run `LagLens.exe`.
+4. Windows SmartScreen may warn because the build is currently unsigned.
+   Verify the SHA-256 in `BUILD_INFO.txt` before running.
+
+The ZIP is a self-contained `onedir` build. It includes Python, Qt,
+PySide6, PresentMon and the license notices. It does not install a
+service or add itself to startup.
 
 ## First capture
 
@@ -164,7 +190,13 @@ test use. Source checkouts keep captures under the repository’s
 `captures/` folder, which is ignored by Git.
 
 LagLens has no account system, no cloud sync and no capture upload. It
-does not send telemetry. Reports use the capture basename and target
+does not send telemetry. The Network tab measures gateway/public RTT
+locally with ICMP; every Live Frames session records frames, hardware
+telemetry and network probes together from one Start button. A public
+probe is not game-server latency. The optional AI insight and AI assistant send
+the small joint summary shown on the Analysis page plus your chat
+question, not the CSV, raw probe log or IP addresses.
+Reports use the capture basename and target
 process name; they do not include the full user path. Treat captures as
 potentially sensitive because they contain process names, timings and
 optional hardware data.
@@ -174,7 +206,7 @@ optional hardware data.
 Requires Windows, Python 3.12 and a virtual environment:
 
 ```powershell
-git clone https://github.com/zhangyuzheng728-netizen/LagLens-Public.git LagLens
+git clone <your-fork-or-repository-url>
 cd LagLens
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -189,8 +221,7 @@ Run the tests:
 
 ## Build the Windows package
 
-Place the [PresentMon CLI](vendor/presentmon/README.md) in its expected
-location, then install the build dependencies and run the packaging script:
+Install the build dependencies and run the packaging script:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
@@ -219,13 +250,13 @@ development artifacts.
 
 ## Known limitations
 
-- **Long recordings:** opening a long recording in Analysis can
-  noticeably delay the UI. This was observed on a roughly 140,000-frame
-  capture. Shorter captures can be used for a quicker first run.
+- **Pre-release validation:** the packaged build has passed automated and
+  non-elevated UI checks, but a fresh elevated real-game ETW capture with
+  the final package is still the release-blocking manual acceptance item.
 - ETW capture requires administrator rights or membership in
   `Performance Log Users`; without either, live capture cannot start.
-- PresentMon 2.6.0 is the expected CLI version. Other versions may
-  produce different CSV columns or behavior.
+- PresentMon 2.6.0 is bundled. Replacement PresentMon builds are not
+  guaranteed to produce the same CSV columns or behavior.
 - QPC mode is opt-in and its absolute mapping depends on the host clock;
   legacy Relative CSV remains the safe default.
 - NVIDIA telemetry covers supported NVIDIA GPUs only. AMD/Intel GPU
@@ -236,13 +267,14 @@ development artifacts.
   restrictions are not fully validated.
 - The C-4 checklist state is session-local; it is not saved into the
   report or restored after restarting LagLens.
-- There is no network diagnostics, automatic A/B testing, cloud service
-  or AI analysis.
+- There is no network diagnostics, automatic A/B testing or cloud
+  service. AI insight is optional, local-summary-only and not a
+  diagnostic conclusion.
 
 ## Third-party components and licenses
 
 LagLens is distributed under the MIT License; see [LICENSE](LICENSE).
-A locally built Windows package includes:
+The packaged application includes:
 
 - **Qt / PySide6 / shiboken6 6.12.0** — LGPL-3.0-only, used under the
   LGPL option. Qt libraries are separate, replaceable DLLs/plugins.

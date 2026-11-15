@@ -102,11 +102,38 @@ class SettingsTests(unittest.TestCase):
             path = self._path(folder)
 
             config = settings.AppSettings(path)
+            self.assertFalse(config.target_fps_explicit)
             config.set_target_fps(144)
 
+            reloaded = settings.AppSettings(path)
+
             self.assertEqual(
-                settings.AppSettings(path).target_fps,
+                reloaded.target_fps,
                 144,
+            )
+            self.assertTrue(
+                reloaded.target_fps_explicit
+            )
+
+    def test_network_public_target_round_trip(self):
+
+        with tempfile.TemporaryDirectory() as folder:
+
+            path = self._path(folder)
+            config = settings.AppSettings(path)
+
+            self.assertEqual(
+                config.network_public_target,
+                settings.DEFAULT_NETWORK_PUBLIC_TARGET,
+            )
+
+            config.set_network_public_target("8.8.8.8")
+
+            self.assertEqual(
+                settings.AppSettings(
+                    path
+                ).network_public_target,
+                "8.8.8.8",
             )
 
     def test_invalid_target_fps_falls_back(self):
@@ -458,7 +485,7 @@ class SettingsTests(unittest.TestCase):
             / settings.CONFIG_DIR_NAME,
         )
         self.assertNotIn(
-            "D:\\ExampleLegacyData",
+            "D:\\LagLensData",
             [str(path) for path in candidates],
         )
 

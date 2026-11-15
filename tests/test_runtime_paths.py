@@ -31,15 +31,18 @@ class RuntimePathTests(unittest.TestCase):
             ).is_file()
         )
 
-    def test_source_mode_resolves_optional_presentmon_path(self):
+    def test_source_mode_uses_bundled_presentmon(self):
 
         self.assertEqual(
             main.DEFAULT_PRESENTMON.name,
             "PresentMon-2.6.0-x64.exe",
         )
+        self.assertTrue(
+            main.DEFAULT_PRESENTMON.is_file()
+        )
         self.assertEqual(
-            main.DEFAULT_PRESENTMON.parent,
-            ROOT / "vendor" / "presentmon",
+            main.DEFAULT_PRESENTMON.parent.name,
+            "presentmon",
         )
 
 

@@ -1,8 +1,8 @@
 
 import html
 import math
+import statistics
 import sys
-
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -47,13 +47,25 @@ from PySide6.QtWidgets import (
 
 from frame_stats import compute_stats
 from i18n import get_manager, tr
+import ai_insight
 import diagnostic_report
 import diagnostic_text
+import capture_session
 import diagnostics
 import frame_timebase
+import network_chart
+import network_sampler
 import swap_chains
 import ui_theme
 from telemetry import read_telemetry
+
+
+def _number_value(value):
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ==========================================
@@ -99,11 +111,171 @@ class FrameChart(QWidget):
         self.frames = frames
         self.threshold = threshold
         self.points = []
+        self.point_frames = []
         self.selected_index = None
+        self.maximum = 0.0
+        self._points_key = None
+        self._geometry = None
 
         ui_theme.apply_chart_typography(self)
 
         self.setMinimumHeight(320)
+
+    def set_frames(self, frames):
+        """Replace the frame data and invalidate the plot cache."""
+
+        self.frames = frames
+        self.points = []
+        self.point_frames = []
+        self.selected_index = None
+        self.maximum = max(
+            (frame["duration"] for frame in frames),
+            default=0.0,
+        )
+        self._points_key = None
+        self._geometry = None
+        self.update()
+
+    def _ensure_plot(self, width, height):
+        """Build and cache display points for the current widget size."""
+
+        key = (
+            id(self.frames),
+            len(self.frames),
+            width,
+            height,
+        )
+
+        if self._points_key == key and self._geometry is not None:
+
+            return self._geometry
+
+        metrics = QFontMetrics(self.font())
+        line_height = metrics.height()
+        maximum = max(
+            (frame["duration"] for frame in self.frames),
+            default=0.0,
+        )
+        self.maximum = maximum
+        scale = max(
+            50.0,
+            math.ceil(maximum * 1.1 / 25) * 25.0,
+        )
+        labels = [
+            f"{fraction * scale:.0f} ms"
+            for fraction in (0, 0.25, 0.5, 0.75, 1)
+        ]
+        left = max(
+            metrics.horizontalAdvance(text)
+            for text in labels
+        ) + 14
+        top = line_height + 8
+        right = max(left + 1, width - 16)
+        bottom = max(top + 1, height - line_height - 12)
+        start = (
+            self.frames[0]["time"]
+            if self.frames
+            else 0.0
+        )
+        span = max(
+            0.001,
+            (
+                self.frames[-1]["time"]
+                - self.frames[0]["time"]
+            )
+            if self.frames
+            else 0.0,
+        )
+        self._geometry = {
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "width": width,
+            "height": height,
+            "scale": scale,
+            "labels": labels,
+            "line_height": line_height,
+            "start": start,
+            "span": span,
+        }
+        self._points_key = key
+        self._build_points()
+        return self._geometry
+
+    def _build_points(self):
+        """Downsample display points while keeping each bucket's peak.
+
+        Statistics, stutter detection, export and AI facts still use every
+        frame. Only the chart's display points are reduced.
+        """
+
+        geometry = self._geometry
+
+        if not self.frames or geometry is None:
+
+            self.points = []
+            self.point_frames = []
+            return
+
+        left = geometry["left"]
+        right = geometry["right"]
+        top = geometry["top"]
+        bottom = geometry["bottom"]
+        scale = geometry["scale"]
+        start = geometry["start"]
+        span = geometry["span"]
+        count = len(self.frames)
+        target = max(800, min(3000, int(geometry["width"])))
+
+        if count <= target:
+
+            indices = range(count)
+
+        else:
+
+            buckets = {}
+
+            for index, frame in enumerate(self.frames):
+
+                column = int(
+                    (frame["time"] - start) / span * target
+                )
+                current = buckets.get(column)
+
+                if (
+                    current is None
+                    or frame["duration"]
+                    > self.frames[current]["duration"]
+                ):
+
+                    buckets[column] = index
+
+            indices = sorted(
+                set(buckets.values()) | {0, count - 1}
+            )
+
+        points = []
+        point_frames = []
+
+        for index in indices:
+
+            frame = self.frames[index]
+            x = (
+                left
+                + (frame["time"] - start) / span
+                * (right - left)
+            )
+            y = (
+                bottom
+                - frame["duration"] / scale
+                * (bottom - top)
+            )
+            points.append(QPointF(x, y))
+            point_frames.append(index)
+
+        self.points = points
+        self.point_frames = point_frames
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -122,52 +294,25 @@ class FrameChart(QWidget):
             QColor(ui_theme.CHART["surface"]),
         )
 
-        metrics = QFontMetrics(self.font())
-        line_height = metrics.height()
-
-        # 自动计算 Y 轴范围
-        maximum = max(
-            frame["duration"]
-            for frame in self.frames
+        geometry = self._ensure_plot(
+            self.width(),
+            self.height(),
         )
-
-        scale = max(
-            50.0,
-            math.ceil(maximum * 1.1 / 25) * 25.0
-        )
-
-        labels = [
-            f"{fraction * scale:.0f} ms"
-            for fraction in (0, 0.25, 0.5, 0.75, 1)
-        ]
-
-        left = max(
-            metrics.horizontalAdvance(text)
-            for text in labels
-        ) + 14
-
-        top = line_height + 8
-
-        right = max(
-            left + 1,
-            self.width() - 16
-        )
-
-        bottom = max(
-            top + 1,
-            self.height() - line_height - 12
-        )
-
+        left = geometry["left"]
+        top = geometry["top"]
+        right = geometry["right"]
+        bottom = geometry["bottom"]
+        scale = geometry["scale"]
+        labels = geometry["labels"]
+        line_height = geometry["line_height"]
         width = right - left
         height = bottom - top
 
-        # 1px 网格线保持像素清晰
         painter.save()
         painter.setRenderHint(
             QPainter.RenderHint.Antialiasing,
             False,
         )
-
         grid_pen = QPen(
             QColor(ui_theme.CHART["grid"]),
             1,
@@ -175,26 +320,22 @@ class FrameChart(QWidget):
         grid_pen.setCosmetic(True)
         painter.setPen(grid_pen)
 
-        for fraction in (
-            0, 0.25, 0.5, 0.75, 1
-        ):
-            y = round(
-                bottom - fraction * height
-            )
+        for fraction in (0, 0.25, 0.5, 0.75, 1):
 
+            y = round(bottom - fraction * height)
             painter.drawLine(
                 QPointF(left, y),
                 QPointF(right, y),
             )
 
         painter.restore()
-
         painter.setPen(QColor(ui_theme.CHART["axis"]))
 
         for fraction, text in zip(
             (0, 0.25, 0.5, 0.75, 1),
             labels,
         ):
+
             y = bottom - fraction * height
             rect = QRectF(
                 0,
@@ -202,7 +343,6 @@ class FrameChart(QWidget):
                 max(1, left - 10),
                 line_height,
             )
-
             painter.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignRight
@@ -210,13 +350,11 @@ class FrameChart(QWidget):
                 text,
             )
 
-        # 异常阈值虚线
         if self.threshold <= scale:
-            y = round(
-                bottom
-                - self.threshold / scale * height
-            )
 
+            y = round(
+                bottom - self.threshold / scale * height
+            )
             painter.save()
             painter.setRenderHint(
                 QPainter.RenderHint.Antialiasing,
@@ -235,33 +373,6 @@ class FrameChart(QWidget):
             )
             painter.restore()
 
-        # 帧时间坐标
-        start = self.frames[0]["time"]
-
-        duration_range = max(
-            0.001,
-            self.frames[-1]["time"] - start
-        )
-
-        self.points = []
-
-        for frame in self.frames:
-            x = (
-                left
-                + (frame["time"] - start)
-                / duration_range * width
-            )
-
-            y = (
-                bottom
-                - frame["duration"] / scale * height
-            )
-
-            self.points.append(
-                QPointF(x, y)
-            )
-
-        # 青绿色曲线
         line_pen = QPen(
             QColor(ui_theme.CHART["line"]),
             2,
@@ -270,38 +381,41 @@ class FrameChart(QWidget):
         painter.setPen(line_pen)
 
         if len(self.points) >= 2:
+
             painter.drawPolyline(
                 QPolygonF(self.points)
             )
 
-        # 异常帧红点
-        painter.setPen(
-            Qt.PenStyle.NoPen
-        )
-
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(
             QColor(ui_theme.CHART["alert"])
         )
 
-        for point, frame in zip(
+        for point, frame_index in zip(
             self.points,
-            self.frames
+            self.point_frames,
         ):
-            if frame["duration"] > self.threshold:
-                painter.drawEllipse(
-                    point, 5, 5
-                )
 
-        # 选中帧标记
+            if (
+                self.frames[frame_index]["duration"]
+                > self.threshold
+            ):
+
+                painter.drawEllipse(point, 5, 5)
+
         if (
             self.selected_index is not None
-            and 0 <= self.selected_index < len(self.points)
+            and 0 <= self.selected_index < len(self.frames)
         ):
 
-            selected = self.points[
-                self.selected_index
-            ]
-
+            frame = self.frames[self.selected_index]
+            selected = QPointF(
+                left
+                + (frame["time"] - geometry["start"])
+                / geometry["span"] * (right - left),
+                bottom
+                - frame["duration"] / scale * height,
+            )
             marker_pen = QPen(
                 QColor(ui_theme.COLORS["accent"]),
                 2,
@@ -318,18 +432,13 @@ class FrameChart(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(selected, 7, 7)
 
-        # X 轴标签
-        painter.setPen(
-            QColor(ui_theme.CHART["axis"])
-        )
-
+        painter.setPen(QColor(ui_theme.CHART["axis"]))
         x_rect = QRectF(
             left,
             bottom + 4,
             width,
             line_height,
         )
-
         painter.drawText(
             x_rect,
             Qt.AlignmentFlag.AlignLeft
@@ -342,40 +451,34 @@ class FrameChart(QWidget):
             | Qt.AlignmentFlag.AlignVCenter,
             tr("analysis.chart.end"),
         )
-
         painter.end()
 
-    # 点击曲线上的数据点
     def mousePressEvent(self, event):
         if not self.points:
             return
 
         click = event.position()
-
         index = min(
             range(len(self.points)),
             key=lambda i: (
                 (self.points[i].x() - click.x()) ** 2
                 + (self.points[i].y() - click.y()) ** 2
-            )
+            ),
         )
-
         point = self.points[index]
-
         distance_squared = (
             (point.x() - click.x()) ** 2
             + (point.y() - click.y()) ** 2
         )
 
         if distance_squared <= 20**2:
-            self.selected.emit(index)
+
+            self.selected.emit(self.point_frames[index])
 
 
-# ==========================================
-# 帧数据分析窗口
-# ==========================================
 class FrameViewer(QWidget):
     recheck_requested = Signal(str)
+    ai_context_changed = Signal(object)
 
     def __init__(
         self,
@@ -386,7 +489,12 @@ class FrameViewer(QWidget):
         csv_path=None,
         telemetry=None,
         target_fps=60,
+        target_fps_explicit=False,
         embedded=False,
+        stats=None,
+        diagnostic_report=None,
+        diagnostics_precomputed=False,
+        ai_report=None,
     ):
         super().__init__()
 
@@ -399,6 +507,9 @@ class FrameViewer(QWidget):
             Path(csv_path) if csv_path is not None else None
         )
         self.target_fps = int(target_fps)
+        self.target_fps_explicit = bool(
+            target_fps_explicit
+        )
 
         if telemetry is None and self.csv_path is not None:
 
@@ -411,18 +522,296 @@ class FrameViewer(QWidget):
                 telemetry = None
 
         self.telemetry = telemetry
+        self.session_metadata = None
+        self.session_id = ""
+        self.network_capture_state = "unknown"
+        self.network_failure_reason = ""
+        self.telemetry_session_mismatch = False
+        self.network_session_mismatch = False
+        self.scenario_override = None
 
-        if selection is not None:
+        if self.csv_path is not None:
+
+            try:
+
+                self.session_metadata = (
+                    capture_session.read_session(
+                        self.csv_path
+                    )
+                )
+
+            except Exception:
+
+                self.session_metadata = None
+
+            try:
+
+                self.network = network_sampler.read_network(
+                    self.csv_path
+                )
+
+            except Exception:
+
+                self.network = network_sampler.NetworkReadResult()
+
+        else:
+
+            self.network = network_sampler.NetworkReadResult()
+
+        session_id = capture_session.session_id_of(
+            self.session_metadata
+        )
+        self.session_id = session_id
+        telemetry_metadata = (
+            getattr(self.telemetry, "metadata", None) or {}
+        )
+        telemetry_session_id = str(
+            (telemetry_metadata.get("capture") or {}).get(
+                "session_id"
+            )
+            or ""
+        )
+        network_metadata = (
+            self.network.metadata or {}
+        )
+        network_session_id = str(
+            network_metadata.get("session_id") or ""
+        )
+
+        if (
+            session_id
+            and telemetry_session_id
+            and telemetry_session_id != session_id
+        ):
+
+            self.telemetry_session_mismatch = True
+            self.telemetry = None
+
+        if (
+            session_id
+            and network_session_id
+            and network_session_id != session_id
+        ):
+
+            self.network_session_mismatch = True
+            self.network = (
+                network_sampler.NetworkReadResult(
+                    error="session mismatch"
+                )
+            )
+
+        session_network = (
+            (self.session_metadata or {}).get("data") or {}
+        ).get("network") or {}
+
+        if self.network_session_mismatch:
+
+            self.network_capture_state = "mismatch"
+
+        elif session_network.get("status"):
+
+            self.network_capture_state = str(
+                session_network.get("status")
+            )
+            self.network_failure_reason = str(
+                session_network.get("reason") or ""
+            )
+
+        elif self.network.available:
+
+            self.network_capture_state = "captured"
+
+        self.network_summary = network_sampler.summarize_result(
+            self.network
+        )
+
+        # The loader already passes selection.legacy_frames(); rebuilding it
+        # here cost ~200 ms for a 140k-frame capture on the GUI thread.
+        if selection is not None and not frames:
 
             frames = selection.legacy_frames()
 
         self.frames = frames
         self.filename = filename
         self.target_name = self._find_target_name()
+        self.network_time_aligned = True
+        session_timebase = (
+            (self.session_metadata or {}).get("timebase")
+            or {}
+        ).get("frame") or {}
+        first_frame = self.frames[0] if self.frames else {}
+        self.frame_timebase_kind = str(
+            session_timebase.get("kind")
+            or first_frame.get("timebase_kind")
+            or "unknown"
+        )
+        frame_trusted = bool(
+            session_timebase.get("absolute_mapping_trusted")
+            or first_frame.get("absolute_mapping_trusted")
+        )
 
-        self.stats = compute_stats(frames)
+        if self.frame_timebase_kind == "qpc_ms":
+
+            self.frame_alignment_quality = (
+                "verified_qpc"
+                if frame_trusted
+                else "qpc_unverified"
+            )
+
+        elif self.frame_timebase_kind == "relative":
+
+            self.frame_alignment_quality = (
+                "capture_relative"
+            )
+
+        else:
+
+            self.frame_alignment_quality = "unknown"
+
+        self.network_alignment_quality = (
+            self.frame_alignment_quality
+        )
+
+        if self.network.available and self.frames:
+
+            frame_times = [
+                _time
+                for _time in (
+                    _number_value(frame.get("time"))
+                    for frame in self.frames
+                )
+                if _time is not None
+            ]
+            network_times = [
+                _time
+                for _time in (
+                    _number_value(sample.get("t_ms"))
+                    for sample in self.network.samples
+                )
+                if _time is not None
+            ]
+
+            if frame_times and network_times:
+
+                self.network_time_aligned = bool(
+                    max(network_times) >= min(frame_times)
+                    and min(network_times) <= max(frame_times)
+                )
+
+                if not self.network_time_aligned:
+
+                    self.network = (
+                        network_sampler.NetworkReadResult(
+                            error="time mismatch"
+                        )
+                    )
+                    self.network_capture_state = "time_mismatch"
+                    self.network_alignment_quality = (
+                        "time_mismatch"
+                    )
+
+            self.network_summary = (
+                network_sampler.summarize_result(
+                    self.network
+                )
+            )
+
+        self.stats = (
+            stats
+            if stats is not None
+            else compute_stats(frames)
+        )
 
         self.threshold = self.stats.stutter_threshold_ms
+
+        if diagnostic_report is not None:
+
+            self.diagnostic_report = diagnostic_report
+
+        elif diagnostics_precomputed:
+
+            # The loader already ran (or tried) the diagnostic engine; do
+            # not repeat that work on the GUI thread.
+            self.diagnostic_report = None
+
+        else:
+
+            try:
+
+                self.diagnostic_report = diagnostics.analyze(
+                    frames,
+                    stats=self.stats,
+                    telemetry=self.telemetry,
+                    target_fps=self.target_fps,
+                )
+
+            except Exception:
+
+                self.diagnostic_report = None
+
+        self._diagnostics_precomputed = True
+        self._ai_report_precomputed = False
+
+        if ai_report is not None:
+
+            self.ai_report = ai_report
+
+        else:
+
+            try:
+
+                self.ai_report = ai_insight.build_report_summary(
+                    frames,
+                    application=self.target_name,
+                    target_fps=self.target_fps,
+                    target_fps_explicit=(
+                        self.target_fps_explicit
+                    ),
+                    diagnostic_report=self.diagnostic_report,
+                    stats=self.stats,
+                    telemetry=self.telemetry,
+                    network=self.network_summary,
+                    network_samples=self.network.samples,
+                    network_error=self._network_error_marker(),
+                    network_alignment_quality=(
+                        self.network_alignment_quality
+                    ),
+                    scenario_override=self.scenario_override,
+                    session_status=(
+                        ((self.session_metadata or {}).get(
+                            "capture"
+                        ) or {}).get("status")
+                        or "unknown"
+                    ),
+                    session_id=self.session_id,
+                    language=get_manager().language,
+                    file_name=self.filename,
+                    report_key=(
+                        str(self.csv_path.resolve())
+                        if self.csv_path is not None
+                        else self.filename
+                    ),
+                )
+
+            except Exception:
+
+                self.ai_report = ai_insight.build_report_summary(
+                    [],
+                    application=self.target_name,
+                    target_fps=self.target_fps,
+                    target_fps_explicit=(
+                        self.target_fps_explicit
+                    ),
+                    language=get_manager().language,
+                    file_name=self.filename,
+                    report_key=(
+                        str(self.csv_path.resolve())
+                        if self.csv_path is not None
+                        else self.filename
+                    ),
+                )
+
+        self._ai_report_precomputed = True
 
         self.chain_panel = None
         self.chain_choices = ()
@@ -430,7 +819,6 @@ class FrameViewer(QWidget):
         self._bindings = []
         self._selected_index = None
         self._selected_choice_key = None
-        self.diagnostic_report = None
         self._display_groups = []
         self._display_events = []
         self._guide_states = {}
@@ -655,8 +1043,14 @@ class FrameViewer(QWidget):
         note.setObjectName("muted")
 
         layout.addWidget(title)
+        self.verdict_card = self.build_verdict_card()
+        layout.addWidget(self.verdict_card)
         self.overview_card = self.build_overview_card()
         layout.addWidget(self.overview_card)
+        self.hardware_card = self.build_hardware_card()
+        layout.addWidget(self.hardware_card)
+        self.network_card = self.build_network_card()
+        layout.addWidget(self.network_card)
         layout.addWidget(summary_card)
 
         if self.chain_panel is not None:
@@ -711,6 +1105,887 @@ class FrameViewer(QWidget):
 
         get_manager().language_changed.connect(
             self.retranslate
+        )
+
+    def _network_error_marker(self):
+
+        if self.network_session_mismatch:
+            return "mismatch"
+
+        if self.network_capture_state in (
+            "start_failed",
+            "not_started",
+            "time_mismatch",
+        ):
+            return self.network_capture_state
+
+        if (
+            self.network_capture_state == "captured"
+            and not self.network.available
+        ):
+            return "missing"
+
+        return None
+
+    def _refresh_ai_report(self):
+
+        report_key = (
+            str(self.csv_path.resolve())
+            if self.csv_path is not None
+            else self.filename
+        )
+
+        try:
+
+            self.ai_report = ai_insight.build_report_summary(
+                self.frames,
+                application=self.target_name,
+                target_fps=self.target_fps,
+                target_fps_explicit=(
+                    self.target_fps_explicit
+                ),
+                diagnostic_report=(
+                    self.diagnostic_report
+                ),
+                stats=self.stats,
+                telemetry=self.telemetry,
+                network=self.network_summary,
+                network_samples=self.network.samples,
+                network_error=self._network_error_marker(),
+                network_alignment_quality=(
+                    self.network_alignment_quality
+                ),
+                scenario_override=self.scenario_override,
+                session_status=(
+                    ((self.session_metadata or {}).get(
+                        "capture"
+                    ) or {}).get("status")
+                    or "unknown"
+                ),
+                session_id=self.session_id,
+                language=get_manager().language,
+                file_name=self.filename,
+                report_key=report_key,
+            )
+
+        except Exception:
+
+            return
+
+        self._render_verdict_card()
+        self._render_network_card()
+
+    def ai_context(self):
+        """Return the report context used by the main AI assistant page."""
+
+        if not self.ai_report:
+
+            return None
+
+        context = dict(self.ai_report)
+        context["file"] = self.filename
+        context["report_key"] = self.ai_report.get(
+            "report_key",
+            self.filename,
+        )
+        return context
+
+    def _telemetry_metric(self, samples, section, key):
+        values = []
+
+        for sample in samples:
+
+            value = (
+                (sample.get(section) or {}).get(key)
+            )
+
+            if isinstance(value, (int, float)):
+                values.append(float(value))
+
+        if not values:
+            return None
+
+        return statistics.median(values)
+
+    def build_hardware_card(self):
+
+        card, layout = self.make_card(
+            "analysis.hardware.title"
+        )
+        self.hardware_status = QLabel()
+        self.hardware_status.setWordWrap(True)
+        self.hardware_status.setObjectName("muted")
+        ui_theme.apply_font(
+            self.hardware_status,
+            "caption",
+        )
+        layout.addWidget(self.hardware_status)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(ui_theme.SPACE["lg"])
+        grid.setVerticalSpacing(ui_theme.SPACE["xs"])
+        self.hardware_values = {}
+        labels = (
+            ("target_cpu", "analysis.hardware.target_cpu"),
+            ("system_cpu", "analysis.hardware.system_cpu"),
+            ("gpu", "analysis.hardware.gpu"),
+            ("ram", "analysis.hardware.ram"),
+        )
+
+        for row, (key, label_key) in enumerate(labels):
+
+            label = QLabel()
+            self._bind(label, label_key)
+            label.setObjectName("muted")
+            ui_theme.apply_font(label, "caption")
+            value = QLabel("—")
+            value.setObjectName("value")
+            ui_theme.apply_font(value, "body")
+            grid.addWidget(label, row, 0)
+            grid.addWidget(value, row, 1)
+            self.hardware_values[key] = value
+
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        self._render_hardware_card()
+        return card
+
+    def _render_hardware_card(self):
+
+        if not hasattr(self, "hardware_values"):
+            return
+
+        telemetry = self.telemetry
+        available = bool(
+            telemetry is not None
+            and getattr(telemetry, "available", False)
+            and getattr(telemetry, "samples", None)
+        )
+
+        if not available:
+
+            self.hardware_status.setText(
+                tr("analysis.hardware.unmeasured")
+            )
+
+            for value in self.hardware_values.values():
+                value.setText("—")
+
+            return
+
+        samples = list(telemetry.samples)
+        metadata = getattr(telemetry, "metadata", None) or {}
+        interval = (
+            (metadata.get("sampling") or {}).get("interval_ms")
+            or (metadata.get("capture") or {}).get(
+                "sample_interval_ms"
+            )
+        )
+        status = tr(
+            "analysis.hardware.sampled",
+            count=len(samples),
+        )
+
+        if interval:
+            status += " · " + tr(
+                "analysis.hardware.interval",
+                interval=interval,
+            )
+
+        if getattr(telemetry, "complete", False):
+            status += " · " + tr(
+                "analysis.hardware.complete"
+            )
+        else:
+            status += " · " + tr(
+                "analysis.hardware.partial"
+            )
+
+        self.hardware_status.setText(status)
+        self.hardware_values["target_cpu"].setText(
+            self._hardware_text(
+                self._telemetry_metric(
+                    samples,
+                    "target",
+                    "cpu_percent",
+                ),
+                "%",
+            )
+        )
+        self.hardware_values["system_cpu"].setText(
+            self._hardware_text(
+                self._telemetry_metric(
+                    samples,
+                    "cpu",
+                    "system_percent",
+                ),
+                "%",
+            )
+        )
+        self.hardware_values["gpu"].setText(
+            self._hardware_text(
+                self._telemetry_metric(
+                    samples,
+                    "gpu",
+                    "util_percent",
+                ),
+                "%",
+            )
+        )
+        self.hardware_values["ram"].setText(
+            self._hardware_text(
+                self._telemetry_metric(
+                    samples,
+                    "ram",
+                    "percent",
+                ),
+                "%",
+            )
+        )
+
+    def _hardware_text(self, value, suffix):
+
+        if value is None:
+            return tr("analysis.hardware.not_recorded")
+
+        return f"{value:.1f} {suffix}"
+
+    def _network_state(self):
+
+        if self.network_session_mismatch:
+            return "mismatch"
+
+        if self.network_capture_state in (
+            "start_failed",
+            "not_started",
+            "time_mismatch",
+        ):
+            return self.network_capture_state
+
+        if (
+            self.network_capture_state == "captured"
+            and not self.network.available
+        ):
+            return "missing"
+
+        summary = self.network_summary
+
+        if not summary or not summary.get("available"):
+            return "unmeasured"
+
+        gateway = summary.get("gateway") or {}
+        public = summary.get("public") or {}
+        responses = (
+            gateway.get("responses", 0)
+            + public.get("responses", 0)
+        )
+
+        if not responses:
+            return "no_response"
+
+        timeouts = (
+            gateway.get("timeouts", 0)
+            + public.get("timeouts", 0)
+        )
+        jitter = max(
+            gateway.get("jitter_ms") or 0.0,
+            public.get("jitter_ms") or 0.0,
+        )
+
+        if timeouts or jitter >= 15.0:
+            return "fluctuating"
+
+        return "stable"
+
+    def _verdict_action(self):
+
+        display_available = bool(
+            (self.ai_report.get("display") or {}).get(
+                "available"
+            )
+        )
+        display_attention = bool(
+            (self.ai_report.get("classification") or {}).get(
+                "needs_attention"
+            )
+        )
+        network = self._network_state()
+
+        if not display_available:
+
+            return tr(
+                "analysis.verdict.action.display_unknown"
+            )
+
+        if display_attention and network == "fluctuating":
+
+            return tr("analysis.verdict.action.both")
+
+        if display_attention:
+
+            return tr("analysis.verdict.action.local")
+
+        if network == "fluctuating":
+
+            return tr("analysis.verdict.action.network")
+
+        if network == "unmeasured":
+
+            return tr(
+                "analysis.verdict.action.none_network_unknown"
+            )
+
+        if network in (
+            "start_failed",
+            "missing",
+            "mismatch",
+            "not_started",
+            "time_mismatch",
+        ):
+
+            return tr(
+                "analysis.verdict.action.network_unavailable"
+            )
+
+        if network == "no_response":
+
+            return tr(
+                "analysis.verdict.action.network_no_response"
+            )
+
+        return tr("analysis.verdict.action.none")
+
+    def build_verdict_card(self):
+
+        card, layout = self.make_card(
+            "analysis.verdict.title"
+        )
+        self.verdict_display = QLabel()
+        self.verdict_network = QLabel()
+        self.verdict_action = QLabel()
+        self.verdict_meta = QLabel()
+        self.verdict_meta.setObjectName("muted")
+        ui_theme.apply_font(self.verdict_meta, "caption")
+
+        for label in (
+            self.verdict_display,
+            self.verdict_network,
+            self.verdict_action,
+        ):
+            label.setWordWrap(True)
+            ui_theme.apply_font(label, "body")
+            layout.addWidget(label)
+
+        layout.addWidget(self.verdict_meta)
+
+        scenario_row = QHBoxLayout()
+        scenario_row.setSpacing(ui_theme.SPACE["sm"])
+        scenario_label = QLabel()
+        self._bind(
+            scenario_label,
+            "analysis.scenario.label",
+        )
+        scenario_label.setObjectName("muted")
+        ui_theme.apply_font(scenario_label, "caption")
+        scenario_row.addWidget(scenario_label)
+
+        self.scenario_combo = QComboBox()
+        for key, data in (
+            ("analysis.scenario.auto", None),
+            ("analysis.scenario.game", "game"),
+            ("analysis.scenario.video", "video"),
+            ("analysis.scenario.browser", "browser"),
+            ("analysis.scenario.desktop", "desktop"),
+            ("analysis.scenario.unknown", "unknown"),
+        ):
+            self.scenario_combo.addItem(tr(key), data)
+
+        self.scenario_combo.currentIndexChanged.connect(
+            self._on_scenario_changed
+        )
+        scenario_row.addWidget(self.scenario_combo)
+        scenario_row.addStretch()
+        layout.addLayout(scenario_row)
+
+        self._render_verdict_card()
+        return card
+
+    def _retranslate_scenario_combo(self):
+
+        if not hasattr(self, "scenario_combo"):
+
+            return
+
+        keys = (
+            ("analysis.scenario.auto", None),
+            ("analysis.scenario.game", "game"),
+            ("analysis.scenario.video", "video"),
+            ("analysis.scenario.browser", "browser"),
+            ("analysis.scenario.desktop", "desktop"),
+            ("analysis.scenario.unknown", "unknown"),
+        )
+        self.scenario_combo.blockSignals(True)
+
+        for index, (key, _data) in enumerate(keys):
+
+            if index < self.scenario_combo.count():
+
+                self.scenario_combo.setItemText(
+                    index,
+                    tr(key),
+                )
+
+        self.scenario_combo.blockSignals(False)
+
+    def _on_scenario_changed(self, _index):
+        if not hasattr(self, "scenario_combo"):
+            return
+
+        self.scenario_override = (
+            self.scenario_combo.currentData()
+        )
+        self._refresh_ai_report()
+
+        if self.ai_report:
+            self.ai_context_changed.emit(
+                self.ai_context()
+            )
+
+    def _render_verdict_card(self):
+
+        if not hasattr(self, "verdict_display"):
+            return
+
+        self.verdict_display.setText(
+            tr(
+                "analysis.verdict.display",
+                verdict=self._display_verdict_text(
+                    self.ai_report
+                ),
+            )
+        )
+        self.verdict_network.setText(
+            tr(
+                "analysis.verdict.network",
+                verdict=self._network_verdict_text(),
+            )
+        )
+        self.verdict_action.setText(
+            tr(
+                "analysis.verdict.action",
+                action=self._verdict_action(),
+            )
+        )
+        diagnosis = self.ai_report.get("diagnosis") or {}
+        scenario = diagnosis.get("scenario") or {}
+        quality = diagnosis.get("quality") or {}
+        source_key = (
+            "analysis.scenario.source."
+            + str(scenario.get("source", "none"))
+        )
+        self.verdict_meta.setText(
+            tr(
+                "analysis.diagnosis.meta",
+                scenario=tr(
+                    f"analysis.scenario.{scenario.get('id', 'unknown')}"
+                ),
+                source=tr(source_key),
+                quality=quality.get("status", "unknown"),
+                strength=diagnosis.get(
+                    "evidence_strength",
+                    "insufficient_evidence",
+                ),
+            )
+        )
+
+    def _display_verdict_text(self, report):
+
+        classification = (
+            report.get("classification") or {}
+        )
+        status = classification.get("status", "unknown")
+        display = report.get("display") or {}
+        target = report.get("target_fps")
+        key = f"analysis.ai.classification.{status}"
+        text = tr(
+            key,
+            fps=display.get("average_fps"),
+            target=target if target is not None else "?",
+            cap=classification.get("cap_fps") or "?",
+        )
+
+        if text == key:
+
+            return tr(
+                "analysis.ai.classification.unknown"
+            )
+
+        return text
+
+    def _network_probe_text(self, stats, label):
+
+        if not stats:
+
+            return tr(
+                "network.report.no_probe",
+                name=label,
+            )
+
+        median = stats.get("latency_median_ms")
+        jitter = stats.get("jitter_ms")
+        timeouts = stats.get("timeouts", 0)
+        responses = stats.get("responses", 0)
+
+        if not responses:
+
+            return tr(
+                "network.report.no_response",
+                name=label,
+                timeouts=timeouts,
+            )
+
+        return tr(
+            "network.report.probe_line",
+            name=label,
+            median=(
+                f"{median:.1f}"
+                if median is not None
+                else "—"
+            ),
+            jitter=(
+                f"{jitter:.1f}"
+                if jitter is not None
+                else "—"
+            ),
+            timeouts=timeouts,
+            samples=stats.get("samples", 0),
+        )
+
+    def _network_verdict_text(self):
+
+        if self.network_session_mismatch:
+
+            return tr(
+                "network.report.session_mismatch"
+            )
+
+        if self.network_capture_state == "start_failed":
+
+            return tr(
+                "network.report.start_failed",
+                reason=(
+                    self.network_failure_reason
+                    or tr("network.probe_error")
+                ),
+            )
+
+        if self.network_capture_state == "time_mismatch":
+
+            return tr("network.report.time_mismatch")
+
+        if self.network_capture_state == "not_started":
+
+            return tr("network.report.not_started")
+
+        if (
+            self.network_capture_state == "captured"
+            and not self.network.available
+        ):
+
+            return tr("network.report.missing")
+
+        summary = self.network_summary
+
+        if not summary or not summary.get("available"):
+
+            return tr("network.report.unmeasured")
+
+        gateway = summary.get("gateway") or {}
+        public = summary.get("public") or {}
+        responses = (
+            gateway.get("responses", 0)
+            + public.get("responses", 0)
+        )
+        timeouts = (
+            gateway.get("timeouts", 0)
+            + public.get("timeouts", 0)
+        )
+        jitter = max(
+            gateway.get("jitter_ms") or 0.0,
+            public.get("jitter_ms") or 0.0,
+        )
+
+        if not responses:
+
+            return tr(
+                "network.report.all_unresponsive"
+            )
+
+        if timeouts or jitter >= 15.0:
+
+            return tr(
+                "network.report.fluctuating",
+                jitter=f"{jitter:.1f}",
+                timeouts=timeouts,
+            )
+
+        return tr("network.report.stable")
+
+    def build_network_card(self):
+
+        card, layout = self.make_card(
+            "network.report.title"
+        )
+
+        self.network_summary_label = QLabel()
+        self.network_summary_label.setWordWrap(True)
+        self.network_summary_label.setObjectName(
+            "detailsPanel"
+        )
+        ui_theme.apply_font(
+            self.network_summary_label,
+            "body",
+        )
+        layout.addWidget(self.network_summary_label)
+
+        self.network_empty_label = QLabel()
+        self.network_empty_label.setWordWrap(True)
+        self.network_empty_label.setObjectName("muted")
+        ui_theme.apply_font(
+            self.network_empty_label,
+            "caption",
+        )
+        layout.addWidget(self.network_empty_label)
+
+        self.network_metrics = QGridLayout()
+        self.network_metrics.setHorizontalSpacing(
+            ui_theme.SPACE["lg"]
+        )
+        self.network_metrics.setVerticalSpacing(
+            ui_theme.SPACE["xs"]
+        )
+        self.network_values = {}
+        headers = (
+            ("gateway", "network.report.gateway"),
+            ("public", "network.report.public"),
+        )
+
+        for column, (key, title_key) in enumerate(headers):
+
+            title = QLabel()
+            self._bind(title, title_key)
+            ui_theme.apply_font(
+                title,
+                "label",
+                weight=QFont.Weight.DemiBold,
+            )
+            self.network_metrics.addWidget(
+                title,
+                0,
+                column * 2,
+                1,
+                2,
+            )
+            self.network_values[key] = {}
+
+        rows = (
+            ("median", "network.report.median"),
+            ("jitter", "network.report.jitter"),
+            ("timeouts", "network.report.timeouts"),
+            ("samples", "network.report.samples"),
+        )
+
+        for row, (metric, label_key) in enumerate(rows, 1):
+
+            for column, key in enumerate(
+                ("gateway", "public")
+            ):
+
+                label = QLabel()
+                self._bind(label, label_key)
+                label.setObjectName("muted")
+                ui_theme.apply_font(
+                    label,
+                    "caption",
+                )
+                value = QLabel("—")
+                value.setObjectName("value")
+                ui_theme.apply_font(value, "body")
+                self.network_metrics.addWidget(
+                    label,
+                    row,
+                    column * 2,
+                )
+                self.network_metrics.addWidget(
+                    value,
+                    row,
+                    column * 2 + 1,
+                )
+                self.network_values[key][metric] = value
+
+        layout.addLayout(self.network_metrics)
+
+        self.network_coverage = QLabel()
+        self.network_coverage.setWordWrap(True)
+        self.network_coverage.setObjectName("muted")
+        ui_theme.apply_font(
+            self.network_coverage,
+            "caption",
+        )
+        layout.addWidget(self.network_coverage)
+
+        self.network_chart = network_chart.NetworkChart()
+        self.network_chart.setVisible(False)
+        layout.addWidget(self.network_chart)
+
+        self.network_missing_label = QLabel()
+        self.network_missing_label.setWordWrap(True)
+        self.network_missing_label.setObjectName("muted")
+        ui_theme.apply_font(
+            self.network_missing_label,
+            "caption",
+        )
+        layout.addWidget(self.network_missing_label)
+
+        self._render_network_card()
+        return card
+
+    def _render_network_card(self):
+
+        if not hasattr(self, "network_values"):
+
+            return
+
+        summary = self.network_summary
+        display_text = self._display_verdict_text(
+            self.ai_report
+        )
+        network_text = self._network_verdict_text()
+        summary_text = tr(
+            "network.report.joint_summary",
+            display=display_text,
+            network=network_text,
+        )
+
+        if summary and summary.get("available"):
+
+            summary_text += "\n" + tr(
+                "network.report.missing_line"
+            )
+
+        self.network_summary_label.setText(summary_text)
+
+        available = bool(
+            summary and summary.get("available")
+        )
+        self.network_empty_label.setVisible(not available)
+        self.network_empty_label.setText(
+            tr("network.report.unmeasured_help")
+            if not available
+            else ""
+        )
+
+        for key in ("gateway", "public"):
+
+            stats = (
+                summary.get(key)
+                if summary and available
+                else None
+            ) or {}
+            values = self.network_values[key]
+            values["median"].setText(
+                (
+                    f"{stats['latency_median_ms']:.1f} ms"
+                    if stats.get("latency_median_ms")
+                    is not None
+                    else "—"
+                )
+            )
+            values["jitter"].setText(
+                (
+                    f"{stats['jitter_ms']:.1f} ms"
+                    if stats.get("jitter_ms") is not None
+                    else "—"
+                )
+            )
+            values["timeouts"].setText(
+                str(stats.get("timeouts", 0))
+                if stats
+                else "—"
+            )
+            values["samples"].setText(
+                str(stats.get("samples", 0))
+                if stats
+                else "—"
+            )
+
+        if not available:
+
+            self.network_chart.setVisible(False)
+            self.network_coverage.setText("")
+            self.network_missing_label.setText(
+                tr("network.report.missing_line")
+            )
+            return
+
+        self.network_chart.setVisible(True)
+        last_t = max(
+            [
+                float(sample.get("t_ms") or 0.0)
+                for sample in self.network.samples
+            ]
+            or [0.0]
+        )
+        duration_ms = max(
+            1000.0,
+            self.stats.duration_s * 1000.0,
+            last_t,
+        )
+        self.network_chart.set_data(
+            self.network.samples,
+            duration_ms,
+        )
+        coverage_text = tr(
+            "network.report.coverage",
+            start=(
+                f"{summary.get('coverage_start_s'):.1f}"
+                if summary.get("coverage_start_s")
+                is not None
+                else "—"
+            ),
+            end=(
+                f"{summary.get('coverage_end_s'):.1f}"
+                if summary.get("coverage_end_s")
+                is not None
+                else "—"
+            ),
+            samples=(
+                (summary.get("gateway") or {}).get(
+                    "samples",
+                    0,
+                )
+                + (summary.get("public") or {}).get(
+                    "samples",
+                    0,
+                )
+            ),
+        )
+
+        if self.network_alignment_quality == "qpc_unverified":
+
+            coverage_text += " · " + tr(
+                "network.report.alignment_unverified"
+            )
+
+        elif self.network_alignment_quality == "capture_relative":
+
+            coverage_text += " · " + tr(
+                "network.report.alignment_relative"
+            )
+
+        self.network_coverage.setText(coverage_text)
+        self.network_missing_label.setText(
+            tr("network.report.missing_line")
         )
 
     def build_overview_card(self):
@@ -1832,16 +3107,28 @@ class FrameViewer(QWidget):
 
         try:
 
-            self.diagnostic_report = diagnostics.analyze(
-                self.frames,
-                stats=self.stats,
-                telemetry=self.telemetry,
-                target_fps=self.target_fps,
-            )
+            if not self._diagnostics_precomputed:
+
+                self.diagnostic_report = diagnostics.analyze(
+                    self.frames,
+                    stats=self.stats,
+                    telemetry=self.telemetry,
+                    target_fps=self.target_fps,
+                )
+
+            self._diagnostics_precomputed = False
 
         except Exception:
 
             self.diagnostic_report = None
+
+        if self._ai_report_precomputed:
+
+            self._ai_report_precomputed = False
+
+        else:
+
+            self._refresh_ai_report()
 
         self._display_groups = []
         self._display_events = []
@@ -2723,8 +4010,7 @@ class FrameViewer(QWidget):
         self.selection = selection
         self.frames = selection.legacy_frames()
 
-        self.chart.frames = self.frames
-        self.chart.points = []
+        self.chart.set_frames(self.frames)
         self.chart.selected_index = None
         self._selected_index = None
 
@@ -2983,7 +4269,11 @@ class FrameViewer(QWidget):
             )
 
         self._sync_chain_combo()
+        self._retranslate_scenario_combo()
         self.update_summary()
+        self._render_verdict_card()
+        self._render_hardware_card()
+        self._render_network_card()
         self._update_glossary_toggle_text()
         self._update_glossary_text()
         self._update_technical_toggle_text()

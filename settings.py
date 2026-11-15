@@ -34,6 +34,8 @@ MAX_TARGET_FPS = 1000
 MAX_REMEMBERED_TARGETS = 50
 MAX_RECENT_CAPTURES = 8
 
+DEFAULT_NETWORK_PUBLIC_TARGET = "1.1.1.1"
+
 DEFAULT_TELEMETRY_INTERVAL_MS = 250
 MIN_TELEMETRY_INTERVAL_MS = 100
 MAX_TELEMETRY_INTERVAL_MS = 5000
@@ -41,9 +43,12 @@ MAX_TELEMETRY_INTERVAL_MS = 5000
 LANGUAGE_KEY = "ui/language"
 TARGET_FPS_KEY = "performance/target_fps"
 TELEMETRY_INTERVAL_KEY = "telemetry/interval_ms"
+NETWORK_PUBLIC_TARGET_KEY = "network/public_target"
 SUCCESSFUL_TARGETS_KEY = "processes/successful_targets"
 RECENT_CAPTURES_KEY = "captures/recent"
 ONBOARDING_SEEN_KEY = "ui/onboarding_seen"
+AI_PROVIDER_KEY = "ai/provider"
+AI_MODEL_PREFIX = "ai/model/"
 
 
 def candidate_data_dirs():
@@ -330,6 +335,19 @@ class AppSettings:
 
         return value
 
+    @property
+    def target_fps_explicit(self):
+        """True when the user or a previous run stored a target.
+
+        The default is a diagnostic reference, not an explicit user
+        target, so a stable 30 FPS cap must not be reported as a
+        failure merely because the default is 60.
+        """
+
+        return bool(
+            self._settings.contains(TARGET_FPS_KEY)
+        )
+
     def set_target_fps(self, value):
 
         value = int(value)
@@ -341,6 +359,37 @@ class AppSettings:
             )
 
         self._settings.setValue(TARGET_FPS_KEY, value)
+        self.sync()
+
+    # --------------------------------------
+    # Network probe target
+    # --------------------------------------
+
+    @property
+    def network_public_target(self):
+
+        raw = self._settings.value(
+            NETWORK_PUBLIC_TARGET_KEY,
+            DEFAULT_NETWORK_PUBLIC_TARGET,
+        )
+        text = str(raw or "").strip()
+
+        return text or DEFAULT_NETWORK_PUBLIC_TARGET
+
+    def set_network_public_target(self, value):
+
+        text = str(value or "").strip()
+
+        if not text:
+
+            raise ValueError(
+                "network public target must not be empty"
+            )
+
+        self._settings.setValue(
+            NETWORK_PUBLIC_TARGET_KEY,
+            text,
+        )
         self.sync()
 
     # --------------------------------------
@@ -489,6 +538,48 @@ class AppSettings:
             bool(seen),
         )
 
+        self.sync()
+
+    # --------------------------------------
+    # AI provider selection
+    # --------------------------------------
+
+    def ai_provider(self):
+
+        value = self._read_str(AI_PROVIDER_KEY, "").strip().lower()
+        return value or "deepseek"
+
+    def set_ai_provider(self, provider_id):
+
+        value = str(provider_id or "").strip().lower()
+
+        if not value:
+
+            raise ValueError("AI provider is empty")
+
+        self._settings.setValue(AI_PROVIDER_KEY, value)
+        self.sync()
+
+    def ai_model(self, provider_id):
+
+        return self._read_str(
+            AI_MODEL_PREFIX + str(provider_id or "").strip().lower(),
+            "",
+        ).strip()
+
+    def set_ai_model(self, provider_id, model):
+
+        value = str(model or "").strip()
+        provider = str(provider_id or "").strip().lower()
+
+        if not provider or not value:
+
+            raise ValueError("AI model is empty")
+
+        self._settings.setValue(
+            AI_MODEL_PREFIX + provider,
+            value,
+        )
         self.sync()
 
     def _read_str(self, key, default):

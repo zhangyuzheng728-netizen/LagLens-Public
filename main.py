@@ -13,6 +13,7 @@ import threading
 import time
 
 from collections import defaultdict, deque
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -37,6 +38,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -44,16 +47,20 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListView,
     QListWidget,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -76,7 +83,15 @@ from capture_core import (
     summarize_log,
     validate_capture,
 )
+import ai_chat
+import ai_diagnostics
+import ai_providers
+import ai_settings
+import analysis_worker
+import capture_session
 import frame_timebase
+import network_page
+import network_sampler
 import process_catalog
 import runtime_paths
 import swap_chains
@@ -1178,6 +1193,9 @@ class CaptureWorker(QThread):
 
 class LagLens(QWidget):
 
+    analysis_loaded = Signal(str)
+    analysis_failed = Signal(str)
+
     def __init__(self, gpu, job=None, settings=None):
 
         super().__init__()
@@ -1200,8 +1218,10 @@ class LagLens(QWidget):
 
         self._tab_keys = (
             "tab.hardware",
+            "tab.network",
             "tab.live",
             "tab.analysis",
+            "tab.ai",
             "tab.settings",
         )
 
@@ -1214,6 +1234,23 @@ class LagLens(QWidget):
 
         self.worker = None
         self.viewer = None
+        self.analysis_async = True
+        self._analysis_workers = []
+        self._analysis_request_path = None
+        self.analysis_loading = None
+        self.analysis_loading_label = None
+        self.analysis_loading_hint = None
+        self.analysis_empty = None
+        self.ai_chat_store = ai_chat.ChatStore(
+            diagnostics=ai_diagnostics.get_log(),
+            mode=ai_chat.default_mode(),
+        )
+        self.ai_page = None
+        self.settings_page = None
+        self.ai_settings_card = None
+        self.network_service = network_sampler.NetworkService()
+        self.network_page = None
+        self.capture_session = None
         self.last_csv = None
         self.capture_target = None
         self._pending_auto_analysis = None
@@ -1229,6 +1266,12 @@ class LagLens(QWidget):
         self.onboarding_card = None
         self.onboarding_steps = []
         self.recent_list = None
+        self.analysis_switch_button = None
+        self.report_switcher = None
+        self.report_switcher_table = None
+        self.report_switcher_open_button = None
+        self.report_switcher_empty = None
+        self._analysis_generation = 0
 
         # C-1 telemetry state.  Failure to create a sidecar never blocks
         # the PresentMon capture.
@@ -1299,8 +1342,10 @@ class LagLens(QWidget):
         )
 
         self.build_hardware_tab()
+        self.build_network_tab()
         self.build_frames_tab()
         self.build_analysis_tab()
+        self.build_ai_tab()
         self.build_settings_tab()
 
         ui_theme.apply_muted_labels(self)
@@ -1543,6 +1588,17 @@ class LagLens(QWidget):
     # Live Frames tab
     # --------------------------------------
 
+    def build_network_tab(self):
+
+        self.network_page = network_page.NetworkPage(
+            service=self.network_service,
+            settings=self.settings,
+        )
+        self.tabs.addTab(
+            self.network_page,
+            tr("tab.network"),
+        )
+
     def build_frames_tab(self):
 
         content = QWidget()
@@ -1623,6 +1679,17 @@ class LagLens(QWidget):
         browse.clicked.connect(self.browse_exe)
         path_row.addWidget(browse)
         capture_layout.addLayout(path_row)
+
+        # One session always records frames, hardware and network.
+        self.capture_note = QLabel()
+        self._bind(
+            self.capture_note,
+            "live.capture_note",
+        )
+        self.capture_note.setWordWrap(True)
+        self.capture_note.setObjectName("muted")
+        ui_theme.apply_font(self.capture_note, "caption")
+        capture_layout.addWidget(self.capture_note)
 
         # Capture controls
         controls = QHBoxLayout()
@@ -2009,7 +2076,319 @@ class LagLens(QWidget):
 
             return
 
-        capture_path = Path(path)
+        self._open_capture_path(path)
+
+    # --------------------------------------
+    # In-window report switcher
+    # --------------------------------------
+
+    def _sorted_recent_captures(self):
+        """Return recent captures newest first without touching frames."""
+
+        try:
+
+            records = list(self.settings.recent_captures)
+
+        except Exception as error:  # pragma: no cover - defensive UI
+
+            logger.debug(
+                "cannot read recent captures: %s",
+                error,
+            )
+            return []
+
+        return sorted(
+            records,
+            key=lambda record: (
+                str(record.get("captured_at") or ""),
+                str(record.get("path") or "").lower(),
+            ),
+            reverse=True,
+        )
+
+    def _capture_session_metadata(self, path):
+
+        if not path:
+
+            return {}
+
+        try:
+
+            return capture_session.read_session(path) or {}
+
+        except Exception:  # pragma: no cover - defensive UI
+
+            return {}
+
+    def _capture_duration_seconds(self, session):
+
+        capture = (session or {}).get("capture") or {}
+        start = capture.get("started_wall_ns")
+        end = capture.get("ended_wall_ns")
+
+        if not isinstance(start, (int, float)):
+            return None
+
+        if not isinstance(end, (int, float)):
+            return None
+
+        if end <= start:
+            return None
+
+        return (float(end) - float(start)) / 1e9
+
+    def _capture_time_text(self, record, session):
+
+        captured = str(record.get("captured_at") or "")
+
+        if "T" in captured:
+
+            return captured.replace("T", " ")[:19]
+
+        if captured:
+
+            return captured
+
+        capture = (session or {}).get("capture") or {}
+        started = capture.get("started_wall_ns")
+
+        if isinstance(started, (int, float)) and started > 0:
+
+            try:
+
+                return datetime.fromtimestamp(
+                    started / 1e9
+                ).strftime("%Y-%m-%d %H:%M:%S")
+
+            except (OSError, OverflowError, ValueError):
+
+                pass
+
+        return tr("recent.unknown_time")
+
+    def _capture_status_text(self, record, path, session):
+
+        if not path.is_file():
+
+            return tr("recent.missing")
+
+        data = (session or {}).get("data") or {}
+        parts = []
+
+        for key, label_key in (
+            ("frames", "analysis.switch.status.frames"),
+            ("telemetry", "analysis.switch.status.telemetry"),
+            ("network", "analysis.switch.status.network"),
+        ):
+
+            status = str(
+                (data.get(key) or {}).get("status") or ""
+            )
+
+            if status:
+
+                parts.append(
+                    f"{tr(label_key)} {status}"
+                )
+
+        if parts:
+
+            return " · ".join(parts)
+
+        if not Path(
+            str(path) + ".telemetry.jsonl"
+        ).is_file():
+
+            return tr("recent.no_telemetry")
+
+        return tr("analysis.switch.status.legacy")
+
+    def _recent_capture_rows(self):
+
+        rows = []
+
+        for record in self._sorted_recent_captures():
+
+            path = Path(str(record.get("path") or ""))
+            session = self._capture_session_metadata(path)
+            duration = self._capture_duration_seconds(session)
+
+            rows.append(
+                {
+                    "record": record,
+                    "path": path,
+                    "program": (
+                        str(record.get("target") or "")
+                        or path.stem
+                        or str(record.get("name") or "")
+                    ),
+                    "file": (
+                        str(record.get("name") or "")
+                        or path.name
+                    ),
+                    "time": self._capture_time_text(
+                        record,
+                        session,
+                    ),
+                    "duration": duration,
+                    "status": self._capture_status_text(
+                        record,
+                        path,
+                        session,
+                    ),
+                }
+            )
+
+        return rows
+
+    def refresh_report_switcher(self):
+
+        if self.report_switcher_table is None:
+
+            return
+
+        rows = self._recent_capture_rows()
+        table = self.report_switcher_table
+        table.blockSignals(True)
+        table.setRowCount(len(rows))
+
+        for row_index, row in enumerate(rows):
+
+            program = QTableWidgetItem(row["program"])
+            program.setData(
+                Qt.ItemDataRole.UserRole,
+                str(row["path"]),
+            )
+            program.setToolTip(
+                f"{row['program']}\n{row['file']}"
+            )
+            table.setItem(row_index, 0, program)
+            table.setItem(
+                row_index,
+                1,
+                QTableWidgetItem(row["time"]),
+            )
+            duration = row["duration"]
+            table.setItem(
+                row_index,
+                2,
+                QTableWidgetItem(
+                    (
+                        f"{duration:.0f} s"
+                        if duration is not None
+                        else "--"
+                    )
+                ),
+            )
+            status_item = QTableWidgetItem(row["status"])
+            status_item.setToolTip(row["status"])
+            table.setItem(
+                row_index,
+                3,
+                status_item,
+            )
+
+        table.clearSelection()
+        table.setEnabled(bool(rows))
+        table.blockSignals(False)
+
+        if self.report_switcher_empty is not None:
+
+            self.report_switcher_empty.setText(
+                "" if rows else tr("analysis.switch.empty")
+            )
+            self.report_switcher_empty.setVisible(not rows)
+
+        self._update_report_switcher_open_state()
+
+    def _update_report_switcher_open_state(self):
+
+        if self.report_switcher_open_button is None:
+
+            return
+
+        if self.report_switcher_table is None:
+
+            self.report_switcher_open_button.setEnabled(False)
+            return
+
+        model = self.report_switcher_table.selectionModel()
+        selected = bool(
+            model.selectedRows()
+        ) if model is not None else False
+        self.report_switcher_open_button.setEnabled(
+            selected
+        )
+
+    def toggle_report_switcher(self):
+
+        if self.report_switcher is None:
+
+            return
+
+        if self.report_switcher.isVisible():
+
+            self.report_switcher.setVisible(False)
+            return
+
+        self.refresh_report_switcher()
+        self.report_switcher.setVisible(True)
+        self.report_switcher_table.setFocus()
+
+    def cancel_report_switcher(self):
+
+        if self.report_switcher is not None:
+
+            self.report_switcher.setVisible(False)
+
+        if self.report_switcher_table is not None:
+
+            self.report_switcher_table.clearSelection()
+
+    def _open_selected_report(self):
+
+        if self.report_switcher_table is None:
+
+            return False
+
+        model = self.report_switcher_table.selectionModel()
+        selected = (
+            model.selectedRows() if model is not None else []
+        )
+
+        if not selected:
+
+            return False
+
+        return self.open_report_switcher_row(
+            selected[0].row(),
+            0,
+        )
+
+    def open_report_switcher_row(self, row, _column=0):
+
+        if self.report_switcher_table is None:
+
+            return False
+
+        item = self.report_switcher_table.item(row, 0)
+
+        if item is None:
+
+            return False
+
+        path = item.data(Qt.ItemDataRole.UserRole)
+
+        if not path:
+
+            return False
+
+        return self._open_capture_path(path)
+
+    def _open_capture_path(self, path):
+        """Validate and open a recent capture without starting PresentMon."""
+
+        capture_path = Path(str(path))
 
         if not capture_path.is_file():
 
@@ -2022,11 +2401,18 @@ class LagLens(QWidget):
                 ),
             )
             self.refresh_recent_captures()
-            return
+            self.refresh_report_switcher()
+            return False
 
-        info = validate_capture(capture_path)
+        try:
 
-        if not info.ok:
+            info = validate_capture(capture_path)
+
+        except Exception:  # pragma: no cover - defensive UI
+
+            info = None
+
+        if info is None or not info.ok:
 
             QMessageBox.warning(
                 self,
@@ -2037,9 +2423,19 @@ class LagLens(QWidget):
                 ),
             )
             self.refresh_recent_captures()
-            return
+            self.refresh_report_switcher()
+            return False
 
-        self.show_analysis(str(capture_path))
+        if not self.show_analysis(str(capture_path)):
+
+            self.refresh_report_switcher()
+            return False
+
+        if self.report_switcher is not None:
+
+            self.report_switcher.setVisible(False)
+
+        return True
 
     # --------------------------------------
     # Embedded analysis page
@@ -2084,8 +2480,198 @@ class LagLens(QWidget):
             self.analysis_target_label
         )
 
+        self.analysis_switch_button = QPushButton()
+        self._bind(
+            self.analysis_switch_button,
+            "analysis.page.switch_report",
+        )
+        ui_theme.set_button_variant(
+            self.analysis_switch_button,
+            "secondary",
+        )
+        self.analysis_switch_button.clicked.connect(
+            self.toggle_report_switcher
+        )
+        header_layout.addWidget(
+            self.analysis_switch_button
+        )
+
+        self.analysis_ai_button = QPushButton()
+        self._bind(
+            self.analysis_ai_button,
+            "analysis.ai.ask",
+        )
+        ui_theme.set_button_variant(
+            self.analysis_ai_button,
+            "secondary",
+        )
+        self.analysis_ai_button.clicked.connect(
+            self.ask_ai_about_active_report
+        )
+        header_layout.addWidget(
+            self.analysis_ai_button
+        )
+
         self.analysis_header.setVisible(False)
         layout.addWidget(self.analysis_header)
+
+        self.report_switcher = QFrame()
+        self.report_switcher.setObjectName("card")
+        switcher_layout = QVBoxLayout(
+            self.report_switcher
+        )
+        switcher_layout.setContentsMargins(
+            ui_theme.SPACE["md"],
+            ui_theme.SPACE["md"],
+            ui_theme.SPACE["md"],
+            ui_theme.SPACE["md"],
+        )
+        switcher_layout.setSpacing(
+            ui_theme.SPACE["sm"]
+        )
+
+        switcher_title = QLabel()
+        self._bind(
+            switcher_title,
+            "analysis.switch.title",
+        )
+        ui_theme.apply_font(
+            switcher_title,
+            "label",
+            weight=QFont.Weight.DemiBold,
+        )
+        switcher_layout.addWidget(switcher_title)
+
+        switcher_hint = QLabel()
+        self._bind(
+            switcher_hint,
+            "analysis.switch.hint",
+        )
+        switcher_hint.setWordWrap(True)
+        switcher_hint.setObjectName("muted")
+        ui_theme.apply_font(
+            switcher_hint,
+            "caption",
+        )
+        switcher_layout.addWidget(switcher_hint)
+
+        self.report_switcher_table = QTableWidget(0, 4)
+        self.report_switcher_table.setAlternatingRowColors(True)
+        self.report_switcher_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.report_switcher_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.report_switcher_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.report_switcher_table.setSortingEnabled(False)
+        self.report_switcher_table.setWordWrap(False)
+        self.report_switcher_table.setShowGrid(False)
+        self.report_switcher_table.setTextElideMode(
+            Qt.TextElideMode.ElideRight
+        )
+        self.report_switcher_table.verticalHeader().setVisible(
+            False
+        )
+        switch_header = (
+            self.report_switcher_table.horizontalHeader()
+        )
+        switch_header.setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.Interactive,
+        )
+        switch_header.setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        switch_header.setSectionResizeMode(
+            2,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        switch_header.setSectionResizeMode(
+            3,
+            QHeaderView.ResizeMode.Stretch,
+        )
+        self.report_switcher_table.setColumnWidth(0, 180)
+        self.report_switcher_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.report_switcher_table.setMinimumHeight(150)
+        ui_theme.apply_table_typography(
+            self.report_switcher_table
+        )
+        self.report_switcher_table.setHorizontalHeaderLabels(
+            [
+                tr("analysis.switch.column.program"),
+                tr("analysis.switch.column.time"),
+                tr("analysis.switch.column.duration"),
+                tr("analysis.switch.column.status"),
+            ]
+        )
+        self.report_switcher_table.cellDoubleClicked.connect(
+            self.open_report_switcher_row
+        )
+        self.report_switcher_table.itemSelectionChanged.connect(
+            self._update_report_switcher_open_state
+        )
+        switcher_layout.addWidget(
+            self.report_switcher_table,
+            1,
+        )
+
+        self.report_switcher_empty = QLabel()
+        self.report_switcher_empty.setWordWrap(True)
+        self.report_switcher_empty.setObjectName("muted")
+        ui_theme.apply_font(
+            self.report_switcher_empty,
+            "caption",
+        )
+        switcher_layout.addWidget(
+            self.report_switcher_empty
+        )
+
+        switcher_actions = QHBoxLayout()
+        switcher_actions.setSpacing(
+            ui_theme.SPACE["sm"]
+        )
+        switcher_actions.addStretch()
+
+        self.report_switcher_open_button = QPushButton()
+        self._bind(
+            self.report_switcher_open_button,
+            "analysis.switch.open",
+        )
+        ui_theme.set_button_variant(
+            self.report_switcher_open_button,
+            "primary",
+        )
+        self.report_switcher_open_button.setEnabled(False)
+        self.report_switcher_open_button.clicked.connect(
+            self._open_selected_report
+        )
+        switcher_actions.addWidget(
+            self.report_switcher_open_button
+        )
+
+        cancel_switch = QPushButton()
+        self._bind(
+            cancel_switch,
+            "analysis.switch.cancel",
+        )
+        ui_theme.set_button_variant(
+            cancel_switch,
+            "ghost",
+        )
+        cancel_switch.clicked.connect(
+            self.cancel_report_switcher
+        )
+        switcher_actions.addWidget(cancel_switch)
+        switcher_layout.addLayout(switcher_actions)
+
+        self.report_switcher.setVisible(False)
+        layout.addWidget(self.report_switcher)
 
         self.analysis_stack = QStackedWidget()
         layout.addWidget(self.analysis_stack, 1)
@@ -2150,6 +2736,56 @@ class LagLens(QWidget):
         empty_layout.addLayout(empty_actions)
         empty_layout.addStretch()
         self.analysis_stack.addWidget(empty)
+        self.analysis_empty = empty
+
+        loading = QWidget()
+        loading_layout = QVBoxLayout(loading)
+        loading_layout.setContentsMargins(
+            ui_theme.SPACE["xl"],
+            ui_theme.SPACE["xl"],
+            ui_theme.SPACE["xl"],
+            ui_theme.SPACE["xl"],
+        )
+        loading_layout.setSpacing(ui_theme.SPACE["sm"])
+        loading_layout.addStretch()
+
+        self.analysis_loading_label = QLabel()
+        self._bind(
+            self.analysis_loading_label,
+            "analysis.page.loading",
+        )
+        self.analysis_loading_label.setWordWrap(True)
+        self.analysis_loading_label.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter
+        )
+        ui_theme.apply_font(
+            self.analysis_loading_label,
+            "subheading",
+        )
+        loading_layout.addWidget(
+            self.analysis_loading_label
+        )
+
+        self.analysis_loading_hint = QLabel()
+        self._bind(
+            self.analysis_loading_hint,
+            "analysis.page.loading_hint",
+        )
+        self.analysis_loading_hint.setWordWrap(True)
+        self.analysis_loading_hint.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter
+        )
+        self.analysis_loading_hint.setObjectName("muted")
+        ui_theme.apply_font(
+            self.analysis_loading_hint,
+            "caption",
+        )
+        loading_layout.addWidget(
+            self.analysis_loading_hint
+        )
+        loading_layout.addStretch()
+        self.analysis_loading = loading
+        self.analysis_stack.addWidget(loading)
 
         self.analysis_container = QWidget()
         self.analysis_container_layout = QVBoxLayout(
@@ -2171,6 +2807,97 @@ class LagLens(QWidget):
         self.tabs.addTab(
             page, tr("tab.analysis")
         )
+
+    # --------------------------------------
+    # AI assistant page
+    # --------------------------------------
+
+    def build_ai_tab(self):
+
+        self.ai_page = ai_chat.AIChatPage(
+            store=self.ai_chat_store,
+            language=get_manager().language,
+            selection=self.current_ai_selection,
+        )
+        self.ai_page.view_report_requested.connect(
+            self.open_report_from_ai
+        )
+        self.ai_page.open_ai_settings_requested.connect(
+            self.open_ai_settings
+        )
+        self.tabs.addTab(
+            self.ai_page,
+            tr("tab.ai"),
+        )
+
+    def open_ai_settings(self):
+
+        if self.settings_page is not None:
+
+            self.tabs.setCurrentWidget(
+                self.settings_page
+            )
+
+    def ask_ai_about_active_report(self):
+
+        if self.viewer is None:
+
+            return
+
+        context = self.viewer.ai_context()
+
+        if not context:
+
+            return
+
+        self.ai_page.set_report_context(context)
+        self.tabs.setCurrentWidget(self.ai_page)
+
+    def update_ai_context_from_viewer(self, context):
+        """Refresh the linked chat context after a scenario change.
+
+        ``AIChatPage`` rejects a different report key, so this can only
+        update the matching conversation.
+        """
+
+        if self.ai_page is None:
+
+            return
+
+        self.ai_page.refresh_report_context(context)
+
+    def open_report_from_ai(self, report_key):
+        key = str(report_key or "")
+
+        if not key:
+
+            return
+
+        path = Path(key)
+
+        if (
+            self._active_analysis_path == str(
+                path.resolve()
+            )
+            and self.viewer is not None
+        ):
+
+            self._show_analysis_page()
+            return
+
+        if not path.is_file():
+
+            QMessageBox.warning(
+                self,
+                tr("dialog.analysis_error.title"),
+                tr(
+                    "ai.chat.report_missing",
+                    path=str(path),
+                ),
+            )
+            return
+
+        self.show_analysis(str(path))
 
     # --------------------------------------
     # Settings tab and language switching
@@ -2235,6 +2962,21 @@ class LagLens(QWidget):
         appearance_layout.addWidget(note)
 
         body.addWidget(appearance)
+
+        ai_card, ai_layout = self.make_card(
+            "settings.ai.title"
+        )
+        self.ai_settings_card = ai_settings.AISettingsCard(
+            self.settings
+        )
+        self.ai_settings_card.key_changed.connect(
+            self._on_ai_key_changed
+        )
+        self.ai_settings_card.selection_changed.connect(
+            self._on_ai_selection_changed
+        )
+        ai_layout.addWidget(self.ai_settings_card)
+        body.addWidget(ai_card)
 
         data_card, data_layout = self.make_card(
             "settings.data.title"
@@ -2306,12 +3048,31 @@ class LagLens(QWidget):
         outer.addStretch(1)
 
         page = self.page_with_scroll(content)
+        self.settings_page = page
 
         self.tabs.addTab(
             page, tr("tab.settings")
         )
 
         self._sync_language_combo()
+
+    def current_ai_selection(self):
+
+        return ai_providers.selection_from_settings(
+            self.settings
+        )
+
+    def _on_ai_key_changed(self):
+
+        if self.ai_page is not None:
+
+            self.ai_page.refresh_selection()
+
+    def _on_ai_selection_changed(self, _provider, _model):
+
+        if self.ai_page is not None:
+
+            self.ai_page.refresh_selection()
 
     def _sync_language_combo(self):
 
@@ -2444,6 +3205,26 @@ class LagLens(QWidget):
         if self.viewer is not None:
 
             self._update_analysis_header()
+
+            if hasattr(self.viewer, "ai_context"):
+
+                context = self.viewer.ai_context()
+
+                if context:
+
+                    self.update_ai_context_from_viewer(context)
+
+        if self.report_switcher_table is not None:
+
+            self.report_switcher_table.setHorizontalHeaderLabels(
+                [
+                    tr("analysis.switch.column.program"),
+                    tr("analysis.switch.column.time"),
+                    tr("analysis.switch.column.duration"),
+                    tr("analysis.switch.column.status"),
+                ]
+            )
+            self.refresh_report_switcher()
 
         if (
             self.worker is not None
@@ -3019,6 +3800,8 @@ class LagLens(QWidget):
         target,
         low_overhead,
         qpc_time=False,
+        session_id="",
+        origin_monotonic_ns=None,
     ):
 
         try:
@@ -3048,6 +3831,8 @@ class LagLens(QWidget):
                 qpc_time=qpc_time,
                 gpu_handle=self.gpu,
                 gpu_index=0,
+                session_id=session_id,
+                origin_monotonic_ns=origin_monotonic_ns,
             )
 
             if not sampler.start():
@@ -3168,7 +3953,134 @@ class LagLens(QWidget):
                 type(error).__name__,
             )
 
+    def _finalize_capture_session(
+        self,
+        reason,
+        outcome,
+        network_state,
+    ):
+
+        session = self.capture_session
+
+        if session is None:
+
+            return
+
+        if self._last_success is not None:
+
+            frame_status = "captured"
+            frame_reason = ""
+
+        elif self._last_failure is not None:
+
+            frame_status = "failed"
+            frame_reason = str(
+                getattr(
+                    self._last_failure[0],
+                    "error",
+                    "",
+                )
+                or "capture failed"
+            )
+
+        elif "cancel" in str(reason):
+
+            frame_status = "cancelled"
+            frame_reason = "cancelled"
+
+        else:
+
+            frame_status = "failed"
+            frame_reason = str(reason or "unknown")
+
+        telemetry_status = (
+            "unavailable"
+            if self.sampler is None
+            else self._telemetry_outcome
+        )
+        telemetry_reason = self._telemetry_reason
+
+        if self.sampler is not None:
+
+            write_error = getattr(
+                self.sampler,
+                "write_error",
+                "",
+            )
+
+            if write_error:
+
+                telemetry_status = "unavailable"
+                telemetry_reason = str(write_error)
+
+        if session.network_status == "start_failed":
+
+            network_status = "start_failed"
+
+        elif network_state.get("capture_active"):
+
+            network_status = "captured"
+
+        else:
+
+            network_status = "not_started"
+
+        worker = self.worker
+        frame_timebase = getattr(
+            worker,
+            "frame_timebase",
+            None,
+        )
+        frame_timebase_dict = (
+            frame_timebase.to_dict()
+            if frame_timebase is not None
+            else None
+        )
+
+        session.finish(
+            frame_status=frame_status,
+            frame_reason=frame_reason,
+            telemetry_status=telemetry_status,
+            telemetry_reason=telemetry_reason,
+            network_status=network_status,
+            network_reason=(
+                session.network_reason
+                or self.network_service.last_error
+            ),
+            frame_timebase=frame_timebase_dict,
+        )
+        self.capture_session = None
+
     def _stop_telemetry(self, reason, outcome=None):
+
+        network_state = self.network_service.state()
+
+        try:
+
+            self.network_service.end_capture(
+                reason,
+                outcome or self._telemetry_outcome,
+            )
+
+        except Exception as error:  # pragma: no cover
+
+            logger.debug(
+                "network capture stop failed: %s",
+                error,
+            )
+
+        self._finalize_capture_session(
+            reason,
+            outcome,
+            network_state,
+        )
+
+        if self.network_page is not None:
+
+            self.network_page.set_capture_state(
+                False,
+                False,
+            )
 
         sampler = self.sampler
 
@@ -3332,6 +4244,8 @@ class LagLens(QWidget):
         self.capture_started = time.monotonic()
         self._size_warned = False
         self._disk_warned = False
+        self._last_success = None
+        self._last_failure = None
 
         for value in self.fm.values():
             value.setText("--")
@@ -3343,12 +4257,88 @@ class LagLens(QWidget):
         low_overhead = self.low_overhead.isChecked()
         qpc_time = self.qpc_time.isChecked()
 
+        self.capture_session = (
+            capture_session.CaptureSession.create(
+                csv_path,
+                target,
+            )
+        )
+        self.capture_session.write()
+
         telemetry = self._start_telemetry(
             csv_path,
             target,
             low_overhead,
             qpc_time=qpc_time,
+            session_id=self.capture_session.session_id,
+            origin_monotonic_ns=(
+                self.capture_session.started_monotonic_ns
+            ),
         )
+
+        if telemetry is None:
+
+            self.capture_session.telemetry_status = "unavailable"
+            self.capture_session.telemetry_reason = "start failed"
+
+        else:
+
+            self.capture_session.telemetry_status = "running"
+
+        network_started = False
+        network_reason = ""
+
+        try:
+
+            network_started = (
+                self.network_service.begin_capture(
+                    csv_path,
+                    target,
+                    self.capture_session.started_monotonic_ns,
+                    public_target=(
+                        self.settings.network_public_target
+                    ),
+                    session_id=(
+                        self.capture_session.session_id
+                    ),
+                )
+            )
+
+        except Exception as error:  # pragma: no cover
+
+            network_reason = type(error).__name__
+            logger.debug(
+                "network capture start failed: %s",
+                error,
+            )
+
+        self.capture_session.network_status = (
+            "captured"
+            if network_started
+            else "start_failed"
+        )
+        self.capture_session.network_reason = (
+            network_reason
+            or (
+                ""
+                if network_started
+                else self.network_service.last_error
+                or "start failed"
+            )
+        )
+        self.capture_session.write()
+
+        if self.network_page is not None:
+
+            self.network_page.set_capture_state(
+                True,
+                network_started,
+                failure_reason=(
+                    ""
+                    if network_started
+                    else self.capture_session.network_reason
+                ),
+            )
 
         # Start worker
         try:
@@ -3362,9 +4352,7 @@ class LagLens(QWidget):
                 telemetry=telemetry,
                 qpc_time=qpc_time,
                 capture_started_monotonic_ns=(
-                    telemetry.started_monotonic_ns
-                    if telemetry is not None
-                    else None
+                    self.capture_session.started_monotonic_ns
                 ),
             )
 
@@ -4026,9 +5014,15 @@ class LagLens(QWidget):
 
     def show_analysis(self, filename):
 
+        # Generation guard: a late result from an older request must never
+        # replace the report the user is currently looking at.
+        self._analysis_generation += 1
+        generation = self._analysis_generation
+
         normalized = str(
             Path(filename).resolve()
         )
+        self._analysis_request_path = normalized
 
         if (
             self.viewer is not None
@@ -4037,7 +5031,260 @@ class LagLens(QWidget):
 
             self._update_analysis_header()
             self._show_analysis_page()
+            return True
+
+        if not self.analysis_async:
+
+            return self._show_analysis_sync(
+                filename,
+                generation,
+                normalized,
+            )
+
+        self._show_analysis_loading(filename)
+        worker = analysis_worker.AnalysisWorker(
+            generation,
+            filename,
+            target_fps=self.settings.target_fps,
+            target_fps_explicit=(
+                self.settings.target_fps_explicit
+            ),
+            language=get_manager().language,
+        )
+        worker.ready.connect(self._on_analysis_ready)
+        worker.failed.connect(self._on_analysis_failed)
+        worker.finished.connect(
+            lambda worker=worker: (
+                self._cleanup_analysis_worker(worker)
+            )
+        )
+        self._analysis_workers.append(worker)
+        worker.start()
+        return True
+
+    def _show_analysis_loading(self, filename):
+
+        self.analysis_header.setVisible(True)
+        self.analysis_file_label.setText(
+            tr(
+                "analysis.page.file",
+                name=Path(filename).name,
+            )
+        )
+        self.analysis_target_label.setText(
+            tr(
+                "analysis.page.target",
+                target=tr(
+                    "analysis.page.loading_target"
+                ),
+            )
+        )
+        self.analysis_stack.setCurrentWidget(
+            self.analysis_loading
+        )
+        self.tabs.setCurrentWidget(self.analysis_page)
+
+    def _on_analysis_ready(self, generation, prepared):
+
+        if generation != self._analysis_generation:
+
             return
+
+        path = self._analysis_request_path
+
+        if not path:
+
+            return
+
+        try:
+
+            viewer = FrameViewer(
+                prepared.frames,
+                prepared.filename,
+                index=prepared.index,
+                selection=prepared.selection,
+                csv_path=path,
+                target_fps=self.settings.target_fps,
+                target_fps_explicit=(
+                    self.settings.target_fps_explicit
+                ),
+                embedded=True,
+                telemetry=prepared.telemetry,
+                stats=prepared.stats,
+                diagnostic_report=(
+                    prepared.diagnostic_report
+                ),
+                diagnostics_precomputed=True,
+                ai_report=prepared.ai_report,
+            )
+            viewer.recheck_requested.connect(
+                self.prepare_recheck
+            )
+
+            if hasattr(viewer, "ai_context_changed"):
+
+                viewer.ai_context_changed.connect(
+                    self.update_ai_context_from_viewer
+                )
+
+        except Exception as error:
+
+            self._on_analysis_failed(
+                generation,
+                str(error),
+            )
+            return
+
+        self._install_viewer(
+            viewer,
+            prepared.filename,
+            prepared.target_name,
+            path,
+        )
+
+    def _on_analysis_failed(self, generation, message):
+
+        if generation != self._analysis_generation:
+
+            return
+
+        QMessageBox.warning(
+            self,
+            tr("dialog.analysis_error.title"),
+            str(message),
+        )
+
+        if self.viewer is not None:
+
+            self._update_analysis_header()
+            self._show_analysis_page()
+
+        else:
+
+            self.analysis_header.setVisible(False)
+
+            if self.analysis_empty is not None:
+
+                self.analysis_stack.setCurrentWidget(
+                    self.analysis_empty
+                )
+
+        self.analysis_failed.emit(str(message))
+
+    def _cleanup_analysis_worker(self, worker):
+
+        try:
+
+            self._analysis_workers.remove(worker)
+
+        except ValueError:
+
+            pass
+
+        worker.deleteLater()
+
+    def _stop_analysis_workers(self):
+
+        remaining = []
+
+        for worker in list(self._analysis_workers):
+
+            try:
+
+                worker.requestInterruption()
+                worker.wait(5000)
+
+            except RuntimeError:
+
+                continue
+
+            # A worker still running after the wait must stay referenced:
+            # destroying a live QThread aborts the process. It will finish
+            # and be cleaned up, or the process will exit with it.
+            if worker.isRunning():
+
+                remaining.append(worker)
+
+        self._analysis_workers = remaining
+
+    def _install_viewer(
+        self,
+        viewer,
+        filename,
+        target_name,
+        normalized,
+    ):
+
+        previous = self.viewer
+
+        if previous is not None:
+
+            try:
+
+                previous.recheck_requested.disconnect(
+                    self.prepare_recheck
+                )
+
+            except (RuntimeError, TypeError):
+
+                pass
+
+            if hasattr(previous, "ai_context_changed"):
+
+                try:
+
+                    previous.ai_context_changed.disconnect(
+                        self.update_ai_context_from_viewer
+                    )
+
+                except (RuntimeError, TypeError):
+
+                    pass
+
+            self.analysis_container_layout.removeWidget(
+                previous
+            )
+            previous.setParent(None)
+            previous.deleteLater()
+
+        viewer.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.analysis_container_layout.addWidget(
+            viewer
+        )
+        self.viewer = viewer
+        self._active_analysis_path = normalized
+        self._active_analysis_name = Path(
+            filename
+        ).name
+        self._active_analysis_target = target_name
+        self._update_analysis_header()
+        self._show_analysis_page()
+
+        # The AI assistant always follows the active report.  Each report
+        # keeps its own conversation in ChatStore.
+        if (
+            self.ai_page is not None
+            and hasattr(viewer, "ai_context")
+        ):
+
+            context = viewer.ai_context()
+
+            if context:
+
+                self.ai_page.set_report_context(context)
+
+        self.analysis_loaded.emit(normalized)
+        return True
+
+    def _show_analysis_sync(
+        self,
+        filename,
+        generation,
+        normalized,
+    ):
 
         try:
 
@@ -4074,11 +5321,20 @@ class LagLens(QWidget):
                 selection=selection,
                 csv_path=filename,
                 target_fps=self.settings.target_fps,
+                target_fps_explicit=(
+                    self.settings.target_fps_explicit
+                ),
                 embedded=True,
             )
             viewer.recheck_requested.connect(
                 self.prepare_recheck
             )
+
+            if hasattr(viewer, "ai_context_changed"):
+
+                viewer.ai_context_changed.connect(
+                    self.update_ai_context_from_viewer
+                )
 
         except (
             OSError,
@@ -4094,43 +5350,19 @@ class LagLens(QWidget):
                 str(error),
             )
 
-            return
+            return False
 
-        previous = self.viewer
+        if generation != self._analysis_generation:
 
-        if previous is not None:
+            viewer.deleteLater()
+            return False
 
-            try:
-
-                previous.recheck_requested.disconnect(
-                    self.prepare_recheck
-                )
-
-            except (RuntimeError, TypeError):
-
-                pass
-
-            self.analysis_container_layout.removeWidget(
-                previous
-            )
-            previous.setParent(None)
-            previous.deleteLater()
-
-        viewer.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
+        return self._install_viewer(
+            viewer,
+            filename,
+            target_name,
+            normalized,
         )
-        self.analysis_container_layout.addWidget(
-            viewer
-        )
-        self.viewer = viewer
-        self._active_analysis_path = normalized
-        self._active_analysis_name = Path(
-            filename
-        ).name
-        self._active_analysis_target = target_name
-        self._update_analysis_header()
-        self._show_analysis_page()
 
     # --------------------------------------
     # Update hardware monitoring
@@ -4268,7 +5500,20 @@ class LagLens(QWidget):
 
         self.close_watchdog.stop()
 
+        self._stop_analysis_workers()
+
         self._stop_telemetry("closed", "closed")
+
+        try:
+
+            self.network_service.shutdown()
+
+        except Exception as error:  # pragma: no cover
+
+            logger.debug(
+                "network shutdown failed: %s",
+                error,
+            )
 
         self._closing = False
         self._close_done = True

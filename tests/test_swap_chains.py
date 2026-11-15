@@ -23,6 +23,14 @@ import frame_stats
 import swap_chains
 from frame_viewer import load_frames
 
+ROOT = Path(__file__).resolve().parents[1]
+HISTORICAL = (
+    ROOT
+    / "captures"
+    / "douyin.exe_20261111_232046_016224.csv"
+)
+
+
 def make_row(
     application="game.exe",
     pid="100",
@@ -857,17 +865,18 @@ class CompatibilityTests(unittest.TestCase):
             self.assertTrue(validation.ok)
             self.assertEqual(validation.valid_frames, 5)
 
-    def test_synthetic_four_chain_capture(self):
+    def test_historical_four_chain_capture(self):
 
-        rows = [
-            row
-            for index, count in enumerate((380, 381, 380, 382))
-            for row in frames(
-                swap_chain=f"0x{index + 1}",
-                count=count,
-                start=index * 6400.0,
-            )
-        ]
+        if not HISTORICAL.is_file():
+
+            self.skipTest("historical capture not present")
+
+        with HISTORICAL.open(
+            encoding="utf-8-sig",
+            newline="",
+        ) as file:
+
+            rows = list(csv.DictReader(file))
 
         index = swap_chains.build_index(rows)
         selection = swap_chains.recommend(index)
@@ -878,13 +887,7 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(selection.frame_count, 1523)
         self.assertEqual(selection.confidence, "high")
 
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "synthetic.csv"
-            with path.open("w", encoding="utf-8", newline="") as file:
-                writer = csv.DictWriter(file, fieldnames=list(rows[0]))
-                writer.writeheader()
-                writer.writerows(rows)
-            loaded = load_frames(path)
+        loaded = load_frames(HISTORICAL)
 
         self.assertEqual(len(loaded), 1523)
 

@@ -59,9 +59,9 @@ HEADER = (
 )
 
 ROW = (
-    "sample-player.exe,100,0x1,DXGI,1,256,0,"
-    "Composed: Flip,5661.0396,16.7,16.5,0.2,4.5,"
-    "4.0,3.5,0.5,20.0,16.7,NA,5661.0396,NA,NA,NA"
+    "douyin.exe,16548,0x28C709CF000,DXGI,1,256,0,"
+    "Composed: Flip,5661.0396,6.1904,6.0972,0.0932,11.6614,"
+    "0.9665,0.5859,0.3806,20.6872,1287.4606,NA,5661.0396,NA,NA,NA"
 )
 
 QPC_HEADER = HEADER.replace(
@@ -76,6 +76,55 @@ QPC_ROW_2 = ROW.replace(
     "5661.0396",
     "10033.4",
 )
+
+
+def write_session_capture(
+    tmp,
+    name,
+    target,
+    session_id,
+    started_s=1,
+    ended_s=61,
+    statuses=None,
+    rows=3,
+):
+    """Write a valid CSV plus session metadata for switcher tests."""
+
+    path = Path(tmp) / name
+    row = ROW.replace("douyin.exe", target)
+    path.write_text(
+        HEADER + "\n" + (row + "\n") * rows,
+        encoding="utf-8",
+    )
+    statuses = statuses or {
+        "frames": "complete",
+        "telemetry": "ok",
+        "network": "unmeasured",
+    }
+    session = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "capture": {
+            "csv_name": name,
+            "target_name": target,
+            "started_monotonic_ns": 1,
+            "started_wall_ns": int(started_s * 1e9),
+            "ended_monotonic_ns": 2,
+            "ended_wall_ns": int(ended_s * 1e9),
+            "status": "complete",
+            "reason": "",
+        },
+        "data": {
+            key: {"status": value}
+            for key, value in statuses.items()
+        },
+    }
+    Path(str(path) + ".session.json").write_text(
+        json.dumps(session),
+        encoding="utf-8",
+    )
+    return path
+
 
 
 class FakeProcess:
@@ -168,6 +217,7 @@ class EmbeddedFakeViewer(QWidget):
     """Embeddable viewer stand-in used by single-window navigation tests."""
 
     recheck_requested = Signal(str)
+    ai_chat_requested = Signal(object)
     instances = []
 
     def __init__(
@@ -178,6 +228,7 @@ class EmbeddedFakeViewer(QWidget):
         selection=None,
         csv_path=None,
         target_fps=60,
+        target_fps_explicit=False,
         embedded=False,
     ):
 
@@ -189,8 +240,19 @@ class EmbeddedFakeViewer(QWidget):
         self.selection = selection
         self.csv_path = csv_path
         self.target_fps = target_fps
+        self.target_fps_explicit = target_fps_explicit
         self.embedded = embedded
         EmbeddedFakeViewer.instances.append(self)
+
+    def ai_context(self):
+        return {
+            "report_key": str(
+                Path(str(self.csv_path)).resolve()
+            ),
+            "file": Path(str(self.csv_path)).name,
+            "application": "game.exe",
+            "language": "en",
+        }
 
 
 class BlockingStdout:
@@ -353,7 +415,7 @@ class WorkerTests(QtTestCase):
 
         return laglens.CaptureWorker(
             "C:/nonexistent/PresentMon.exe",
-            "sample-player.exe",
+            "douyin.exe",
             csv_path,
             **kwargs,
         )
@@ -624,7 +686,7 @@ class WorkerTests(QtTestCase):
 
             worker = laglens.CaptureWorker(
                 "C:/nonexistent/PresentMon.exe",
-                "sample-player.exe",
+                "douyin.exe",
                 csv_path,
                 job=job,
             )
@@ -801,9 +863,10 @@ class WindowTests(QtTestCase):
             gpu,
             settings=self.app_settings,
         )
+        self.window.analysis_async = False
         self.window.timer.stop()
         self.window.auto_analyze.setChecked(False)
-        self.window.capture_target = "sample-player.exe"
+        self.window.capture_target = "douyin.exe"
 
     def tearDown(self):
 
@@ -946,7 +1009,7 @@ class WindowTests(QtTestCase):
                     + "\n"
                     + ROW
                     + "\n"
-                    + "sample-player.exe,100"
+                    + "douyin.exe,16548"
                 ),
             )
             info = capture_core.validate_capture(
@@ -1037,7 +1100,7 @@ class WindowTests(QtTestCase):
                 path.resolve()
             )
             self.window._active_analysis_name = path.name
-            self.window._active_analysis_target = "sample-player.exe"
+            self.window._active_analysis_target = "douyin.exe"
 
             with mock.patch.object(
                 laglens,
@@ -1063,7 +1126,7 @@ class WindowTests(QtTestCase):
                 self.window.analysis_file_label.text(),
             )
             self.assertIn(
-                "sample-player.exe",
+                "douyin.exe",
                 self.window.analysis_target_label.text(),
             )
 
@@ -1077,9 +1140,159 @@ class WindowTests(QtTestCase):
             0,
         )
         self.assertEqual(
-            self.window.tabs.tabText(2),
+            self.window.tabs.tabText(3),
             "Analysis",
         )
+
+    def test_top_level_tabs_include_ai_assistant(self):
+
+        labels = [
+            self.window.tabs.tabText(index)
+            for index in range(self.window.tabs.count())
+        ]
+
+        self.assertEqual(
+            labels,
+            [
+                "Hardware",
+                "Network",
+                "Live Frames",
+                "Analysis",
+                "AI assistant",
+                "Settings",
+            ],
+        )
+
+    def test_ai_assistant_can_open_ai_settings(self):
+
+        self.assertIsNotNone(
+            self.window.ai_settings_card
+        )
+        self.window.ai_page.open_ai_settings_requested.emit()
+
+        self.assertIs(
+            self.window.tabs.currentWidget(),
+            self.window.settings_page,
+        )
+
+    def test_network_tab_and_joint_capture_start_idle(self):
+
+        self.assertIsNotNone(self.window.network_page)
+        self.assertIn(
+            "frames",
+            self.window.capture_note.text(),
+        )
+        self.assertIn(
+            "network probes",
+            self.window.capture_note.text(),
+        )
+        self.assertFalse(
+            self.window.network_service.running
+        )
+        self.assertFalse(
+            hasattr(self.window, "mode_online")
+        )
+
+    def test_capture_note_explains_default_network_capture(self):
+
+        self.assertIn(
+            "network",
+            self.window.capture_note.text().lower(),
+        )
+
+    def test_ask_ai_links_active_report_without_separate_window(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            path = Path(tmp) / "capture.csv"
+            path.write_text(
+                HEADER + "\n" + ROW + "\n" + ROW + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                laglens,
+                "FrameViewer",
+                EmbeddedFakeViewer,
+            ):
+
+                self.window.show_analysis(str(path))
+
+            self.window.ask_ai_about_active_report()
+
+            self.assertIs(
+                self.window.tabs.currentWidget(),
+                self.window.ai_page,
+            )
+            self.assertIn(
+                "game.exe",
+                self.window.ai_page.report_label.text(),
+            )
+            self.assertFalse(
+                self.window.ai_page.view_report_button.isHidden()
+            )
+            self.assertFalse(
+                self.window.ai_page.isWindow()
+            )
+
+    def test_ai_page_follows_active_report(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            path_a = Path(tmp) / "a.csv"
+            path_b = Path(tmp) / "b.csv"
+
+            for path in (path_a, path_b):
+                path.write_text(
+                    HEADER + "\n" + ROW + "\n" + ROW + "\n",
+                    encoding="utf-8",
+                )
+
+            with mock.patch.object(
+                laglens,
+                "FrameViewer",
+                EmbeddedFakeViewer,
+            ):
+
+                self.window.show_analysis(str(path_a))
+                self.window.ask_ai_about_active_report()
+                session_a = self.window.ai_page.session
+                session_a.messages.append(
+                    {
+                        "role": "user",
+                        "content": "A 的对话",
+                        "kind": "chat",
+                    }
+                )
+
+                self.window.show_analysis(str(path_b))
+
+                self.assertIsNot(
+                    self.window.ai_page.session,
+                    session_a,
+                )
+                self.assertEqual(
+                    self.window.ai_page.session.report_key,
+                    str(path_b.resolve()),
+                )
+                self.assertIn(
+                    "A 的对话",
+                    [
+                        item["content"]
+                        for item in session_a.messages
+                    ],
+                )
+                self.assertEqual(
+                    self.window.ai_page.session.messages,
+                    [],
+                )
+
+                self.window.ask_ai_about_active_report()
+
+                self.assertEqual(
+                    self.window.ai_page.session.report_key,
+                    str(path_b.resolve()),
+                )
 
     def test_show_analysis_embeds_viewer_in_main_window(self):
 
@@ -1127,7 +1340,7 @@ class WindowTests(QtTestCase):
                 self.window.analysis_file_label.text(),
             )
             self.assertIn(
-                "sample-player.exe",
+                "douyin.exe",
                 self.window.analysis_target_label.text(),
             )
 
@@ -1270,7 +1483,7 @@ class WindowTests(QtTestCase):
             QApplication.processEvents()
 
             self.assertEqual(
-                self.window.tabs.tabText(2),
+                self.window.tabs.tabText(3),
                 "分析报告",
             )
             self.assertIn(
@@ -1296,7 +1509,7 @@ class WindowTests(QtTestCase):
                     {
                         "path": str(path),
                         "name": path.name,
-                        "target": "sample-player.exe",
+                        "target": "douyin.exe",
                         "captured_at": "2026-11-12T10:00:00",
                         "frames": 1,
                         "telemetry": False,
@@ -1322,6 +1535,354 @@ class WindowTests(QtTestCase):
             self.assertTrue(
                 self.window.viewer.embedded
             )
+
+    def test_analysis_header_has_switch_button(self):
+
+        self.assertTrue(
+            self.window.analysis_switch_button.text()
+        )
+        self.assertTrue(
+            self.window.report_switcher.isHidden()
+        )
+
+    def _recent_record(self, path, target, captured_at):
+
+        return {
+            "path": str(path),
+            "name": path.name,
+            "target": target,
+            "captured_at": captured_at,
+            "frames": 3,
+            "telemetry": True,
+        }
+
+    def test_report_switcher_lists_newest_first_with_details(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            older = write_session_capture(
+                tmp,
+                "a.csv",
+                "game-a.exe",
+                "session-a",
+                started_s=1,
+                ended_s=61,
+            )
+            newer = write_session_capture(
+                tmp,
+                "b.csv",
+                "game-b.exe",
+                "session-b",
+                started_s=100,
+                ended_s=220,
+            )
+            self.app_settings.set_recent_captures(
+                [
+                    self._recent_record(
+                        older,
+                        "game-a.exe",
+                        "2026-11-12T10:00:00",
+                    ),
+                    self._recent_record(
+                        newer,
+                        "game-b.exe",
+                        "2026-11-13T10:00:00",
+                    ),
+                ]
+            )
+            self.window.show_analysis(str(older))
+            self.window.toggle_report_switcher()
+
+            table = self.window.report_switcher_table
+            self.assertFalse(
+                self.window.report_switcher.isHidden()
+            )
+            self.assertEqual(table.rowCount(), 2)
+            self.assertEqual(
+                table.item(0, 0).text(),
+                "game-b.exe",
+            )
+            self.assertEqual(
+                table.item(1, 0).text(),
+                "game-a.exe",
+            )
+            self.assertEqual(
+                table.item(0, 1).text(),
+                "2026-11-13 10:00:00",
+            )
+            self.assertEqual(
+                table.item(0, 2).text(),
+                "120 s",
+            )
+            self.assertIn(
+                "Frames complete",
+                table.item(0, 3).text(),
+            )
+
+    def test_report_switcher_opens_selected_report_without_capture(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            older = write_session_capture(
+                tmp,
+                "a.csv",
+                "game-a.exe",
+                "session-a",
+            )
+            newer = write_session_capture(
+                tmp,
+                "b.csv",
+                "game-b.exe",
+                "session-b",
+            )
+            self.app_settings.set_recent_captures(
+                [
+                    self._recent_record(
+                        older,
+                        "game-a.exe",
+                        "2026-11-12T10:00:00",
+                    ),
+                    self._recent_record(
+                        newer,
+                        "game-b.exe",
+                        "2026-11-13T10:00:00",
+                    ),
+                ]
+            )
+            self.window.show_analysis(str(older))
+            self.window.toggle_report_switcher()
+
+            with mock.patch.object(
+                laglens,
+                "CaptureWorker",
+            ) as worker_cls, mock.patch.object(
+                laglens.ai_chat.ChatSession,
+                "send",
+            ) as ai_send:
+
+                self.assertTrue(
+                    self.window.open_report_switcher_row(0, 0)
+                )
+
+            worker_cls.assert_not_called()
+            ai_send.assert_not_called()
+
+            context = self.window.viewer.ai_context()
+            self.assertEqual(
+                self.window._active_analysis_path,
+                str(newer.resolve()),
+            )
+            self.assertEqual(
+                context["report_key"],
+                str(newer.resolve()),
+            )
+            self.assertEqual(
+                context["session_id"],
+                "session-b",
+            )
+            self.assertIsNotNone(self.window.viewer.stats)
+            self.assertTrue(
+                context.get("diagnosis")
+            )
+            self.assertIn(
+                "b.csv",
+                self.window.analysis_file_label.text(),
+            )
+            self.assertIsNone(self.window.worker)
+            self.assertTrue(
+                self.window.report_switcher.isHidden()
+            )
+
+    def test_report_switcher_cancel_keeps_current_report(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            older = write_session_capture(
+                tmp,
+                "a.csv",
+                "game-a.exe",
+                "session-a",
+            )
+            self.window.show_analysis(str(older))
+            self.window.toggle_report_switcher()
+            self.window.cancel_report_switcher()
+
+            self.assertTrue(
+                self.window.report_switcher.isHidden()
+            )
+            self.assertEqual(
+                self.window._active_analysis_path,
+                str(older.resolve()),
+            )
+
+    def test_report_switcher_missing_file_keeps_current_report(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            older = write_session_capture(
+                tmp,
+                "a.csv",
+                "game-a.exe",
+                "session-a",
+            )
+            missing = Path(tmp) / "missing.csv"
+            self.window.show_analysis(str(older))
+
+            with mock.patch.object(
+                laglens.QMessageBox,
+                "warning",
+            ) as warning:
+
+                opened = self.window._open_capture_path(
+                    missing
+                )
+
+            self.assertFalse(opened)
+            warning.assert_called_once()
+            self.assertEqual(
+                self.window._active_analysis_path,
+                str(older.resolve()),
+            )
+
+    def test_report_switcher_damaged_file_keeps_current_report(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            older = write_session_capture(
+                tmp,
+                "a.csv",
+                "game-a.exe",
+                "session-a",
+            )
+            damaged = Path(tmp) / "damaged.csv"
+            damaged.write_text(
+                "Application,FrameTime\ngame.exe,16.7\n",
+                encoding="utf-8",
+            )
+            self.window.show_analysis(str(older))
+
+            with mock.patch.object(
+                laglens.QMessageBox,
+                "warning",
+            ) as warning:
+
+                opened = self.window._open_capture_path(
+                    damaged
+                )
+
+            self.assertFalse(opened)
+            warning.assert_called_once()
+            self.assertEqual(
+                self.window._active_analysis_path,
+                str(older.resolve()),
+            )
+
+    def test_report_switcher_relinks_ai_chat_to_active_report(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            older = write_session_capture(
+                tmp,
+                "a.csv",
+                "game-a.exe",
+                "session-a",
+            )
+            newer = write_session_capture(
+                tmp,
+                "b.csv",
+                "game-b.exe",
+                "session-b",
+            )
+            self.app_settings.set_recent_captures(
+                [
+                    self._recent_record(
+                        older,
+                        "game-a.exe",
+                        "2026-11-12T10:00:00",
+                    ),
+                    self._recent_record(
+                        newer,
+                        "game-b.exe",
+                        "2026-11-13T10:00:00",
+                    ),
+                ]
+            )
+            self.window.show_analysis(str(older))
+            self.window.ask_ai_about_active_report()
+
+            self.assertEqual(
+                self.window.ai_page.report_key,
+                str(older.resolve()),
+            )
+
+            self.window.toggle_report_switcher()
+            self.assertTrue(
+                self.window.open_report_switcher_row(0, 0)
+            )
+            self.assertEqual(
+                self.window.ai_page.report_key,
+                str(newer.resolve()),
+            )
+
+            self.window.ask_ai_about_active_report()
+            self.assertEqual(
+                self.window.ai_page.report_key,
+                str(newer.resolve()),
+            )
+
+    def test_report_switcher_empty_state(self):
+
+        self.app_settings.set_recent_captures([])
+        self.window.refresh_report_switcher()
+        self.window.toggle_report_switcher()
+
+        self.assertEqual(
+            self.window.report_switcher_table.rowCount(),
+            0,
+        )
+        self.assertTrue(
+            self.window.report_switcher_empty.text()
+        )
+        self.assertFalse(
+            self.window.report_switcher_open_button.isEnabled()
+        )
+
+    def test_report_switcher_discards_a_stale_load(self):
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            newer = write_session_capture(
+                tmp,
+                "b.csv",
+                "game-b.exe",
+                "session-b",
+            )
+            original = laglens.swap_chains.load_csv_rows
+            calls = []
+
+            def loader(filename):
+
+                rows = original(filename)
+
+                if not calls:
+
+                    calls.append(filename)
+                    self.window._analysis_generation += 1
+
+                return rows
+
+            with mock.patch.object(
+                laglens.swap_chains,
+                "load_csv_rows",
+                side_effect=loader,
+            ):
+
+                opened = self.window.show_analysis(
+                    str(newer)
+                )
+
+            self.assertFalse(opened)
+            self.assertIsNone(self.window.viewer)
 
     def test_complete_capture_auto_analysis_opens_embedded_page(self):
 
@@ -1413,7 +1974,7 @@ class WindowTests(QtTestCase):
                 item.data(Qt.ItemDataRole.UserRole),
                 result.csv_path,
             )
-            self.assertIn("sample-player.exe", item.text())
+            self.assertIn("douyin.exe", item.text())
 
             with mock.patch.object(
                 self.window,
@@ -1510,7 +2071,7 @@ class WindowTests(QtTestCase):
                     {
                         "path": str(path),
                         "name": path.name,
-                        "target": "sample-player.exe",
+                        "target": "douyin.exe",
                         "captured_at": "2026-11-12T10:00:00",
                         "frames": 1,
                         "telemetry": False,
@@ -1588,7 +2149,7 @@ class WindowTests(QtTestCase):
                     {
                         "path": str(path),
                         "name": path.name,
-                        "target": "sample-player.exe",
+                        "target": "douyin.exe",
                         "captured_at": "2026-11-12T10:00:00",
                         "frames": 1,
                         "telemetry": False,
@@ -1620,7 +2181,7 @@ class WindowTests(QtTestCase):
                 return_value=[
                     {
                         "path": r"<game-path>\game.exe",
-                        "executable": "sample-player.exe",
+                        "executable": "douyin.exe",
                         "last_success": "2026-11-12T01:00:00",
                     }
                 ],
@@ -1633,7 +2194,7 @@ class WindowTests(QtTestCase):
             args, kwargs = remember.call_args
 
             self.assertIs(args[0], self.app_settings)
-            self.assertEqual(args[1], "sample-player.exe")
+            self.assertEqual(args[1], "douyin.exe")
             self.assertEqual(args[2], result.csv_path)
             self.assertIsNotNone(
                 kwargs.get("created_before")
@@ -1645,7 +2206,7 @@ class WindowTests(QtTestCase):
 
             result = self.make_result(
                 tmp,
-                "Application,FrameTime\nsample-player.exe,16.7\n",
+                "Application,FrameTime\ndouyin.exe,16.7\n",
             )
 
             with mock.patch.object(
@@ -1944,19 +2505,48 @@ class WindowTests(QtTestCase):
             self.window,
             "similar_targets",
             return_value=[],
-        ):
+        ), mock.patch.object(
+            self.window.network_service,
+            "begin_capture",
+            return_value=True,
+        ) as begin_network:
 
             exe = Path(self.tmpdir.name) / "PresentMon.exe"
             exe.write_bytes(b"")
 
             self.window.exe_input.setText(str(exe))
             self.window.process_combo.setCurrentText(
-                "sample-player.exe"
+                "douyin.exe"
             )
             self.window.qpc_time.setChecked(True)
 
             self.window.start_capture()
 
+            begin_network.assert_called_once()
+            self.assertEqual(
+                begin_network.call_args.args[2],
+                self.window.capture_session.started_monotonic_ns,
+            )
+            self.assertTrue(
+                begin_network.call_args.kwargs["session_id"]
+            )
+            session_files = list(
+                (Path(self.tmpdir.name) / "captures").glob(
+                    "*.session.json"
+                )
+            )
+            self.assertTrue(session_files)
+            session_data = json.loads(
+                session_files[0].read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                session_data["session_id"],
+                begin_network.call_args.kwargs["session_id"],
+            )
+            self.assertEqual(
+                session_data["data"]["network"]["status"],
+                "captured",
+            )
             self.assertTrue(
                 captured_sampler["qpc_time"]
             )
@@ -1967,7 +2557,7 @@ class WindowTests(QtTestCase):
                 captured_worker[
                     "capture_started_monotonic_ns"
                 ],
-                123_000,
+                self.window.capture_session.started_monotonic_ns,
             )
 
             self.window._stop_telemetry("finished")
@@ -2077,6 +2667,11 @@ class WindowTests(QtTestCase):
                     recheck_slot=slot
                 )
             )
+            ai_chat_requested = SimpleNamespace(
+                connect=lambda slot: captured.update(
+                    chat_slot=slot
+                )
+            )
 
             def __init__(
                 self,
@@ -2086,6 +2681,7 @@ class WindowTests(QtTestCase):
                 selection=None,
                 csv_path=None,
                 target_fps=60,
+                target_fps_explicit=False,
                 embedded=False,
             ):
 
@@ -2204,7 +2800,7 @@ class WindowTests(QtTestCase):
         )
         self.assertEqual(
             self.window.tabs.currentIndex(),
-            1,
+            2,
         )
         self.assertIs(
             self.window.tabs.currentWidget(),
@@ -2496,7 +3092,7 @@ class WindowTests(QtTestCase):
 
         worker = FakeWorker()
         self.window.worker = worker
-        self.window.capture_target = "sample-player.exe"
+        self.window.capture_target = "douyin.exe"
         self.window._target_seen = False
 
         with mock.patch.object(
@@ -2533,7 +3129,7 @@ class WindowTests(QtTestCase):
     def test_target_watcher_ignores_a_target_never_seen(self):
 
         self.window.worker = FakeWorker()
-        self.window.capture_target = "sample-player.exe"
+        self.window.capture_target = "douyin.exe"
         self.window._target_seen = False
 
         with mock.patch.object(
@@ -3024,12 +3620,12 @@ class WindowTests(QtTestCase):
 
         self.window.worker = object()
         self.window.frames_received = False
-        self.window.capture_target = "sample-player.exe"
+        self.window.capture_target = "douyin.exe"
 
         self.window.on_no_frames_yet()
 
         self.assertIn(
-            "No frames from sample-player.exe",
+            "No frames from douyin.exe",
             self.window.frame_status.text(),
         )
 

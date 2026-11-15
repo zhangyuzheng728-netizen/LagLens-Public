@@ -8,38 +8,42 @@ LagLens 是诊断助手，不是“一键修复”工具。它会根据采集到
 CPU、GPU、内存、呈现或数据质量问题，但不能保证找到所有卡顿原因，也不会
 自动修改游戏、驱动或 Windows 设置。
 
-版本 **0.1.0**（源码预览版）。
+版本 **0.1.0**（预发布）。
 
 [English](README.md) · [更新日志](CHANGELOG.md) ·
 [参与贡献](CONTRIBUTING.md) · [第三方声明](packaging/THIRD_PARTY_NOTICES.txt)
 
-![LagLens 分析报告页](docs/screenshots/analysis-zh.png)
+![LagLens 分析报告页](captures/analysis_inline_zh_min.png)
 
 ## 主要功能
 
-- 可选用 PresentMon 2.6.0 命令行工具在本机采集帧时间。
+- 使用内置 PresentMon 2.6.0 在本机采集帧时间。
 - 录制过程中显示实时帧时间、FPS 和帧时间统计。
 - 保存 CSV 抓取文件，以及可选的硬件遥测 sidecar。
 - 自动分组交换链，检测局部帧时间异常，并给出证据、置信度和结论级别。
 - 默认先显示通俗摘要，技术证据可以折叠展开。
 - 每个发现项提供四步排查向导，并在本地记录勾选进度。
 - 支持导出 Markdown / JSON 报告。
-- 最近检测记录和设置都保存在本机；没有账号、云端同步、遥测上传或网络同步。
+- 最近检测记录和设置都保存在本机；没有账号、云端同步或遥测上传。可选的 AI 解读只会在你点击按钮并提供 API Key 后，把少量本地摘要发送给 DeepSeek；AI 助手是主窗口顶部的一级页面，可针对明确关联的报告连续追问。
+- AI 回答受本地证据层约束：自动识别应用场景并允许手动覆盖，检查数据质量，使用稳定的事实 ID、证据强度和允许结论。视频播放或未知场景不能得出“本机性能问题”的结论；引用不存在的事实、数值不符、结论过强或缺少依据的回答会先修复一次，仍不通过则回退为本地事实摘要。
+- AI 默认快捷提问改为“全面分析本次检测结果”，先判断是否存在异常，再分析可能原因和是否需要优化，不再强制在网络与本机性能之间二选一；另有流畅度、硬件、网络和优化建议等可选提问。
 
 ## 不包含的功能
 
 - 不证明唯一根因，也不保证修复卡顿。
 - 不自动修改游戏、驱动、BIOS 或 Windows 设置。
-- 不提供网络诊断、自动 A/B 测试、云端分析或 AI 诊断。
+- 不提供网络诊断、自动 A/B 测试或云端存储分析。可选的 AI 解读只是对本地事实的通俗转述，不是诊断结论，也不能定位根因。它的结论受本地证据层约束，“证据不足”是允许的结论。
 - 不保证覆盖所有游戏引擎、覆盖层、采集方式或异常显示配置。
 
 ## 界面与工作流
 
-- 单主窗口，包含 **硬件 / 实时帧 / 分析报告 / 设置** 四个页面。
+- 单主窗口，包含 **硬件 / 网络 / 实时帧 / 分析报告 / AI 助手 / 设置** 六个页面。
 - 分析报告页内嵌帧时间图表、统计、完整诊断报告、分组发现、可展开证据、
   事件表、C-4 向导和可选的报告导出。
 - “分析上次抓取”、最近检测、停止采集后的自动分析、打开 CSV 都进入同一个
   分析页面。
+- 分析页顶部可直接“切换报告”：在当前窗口列出最近检测记录，按采集时间倒序
+  显示程序、采集时间、时长和数据状态；不会重新采集，也不会自动调用 AI。
 - 从分析页点击“重新检测”会返回实时帧页、预填目标，并重新检查进程是否
   正在运行；不会自动开始采集，也不会复用旧 PID。
 - 支持中英文运行时切换、暗色主题和 980×760 最小窗口。
@@ -49,11 +53,13 @@ CPU、GPU、内存、呈现或数据质量问题，但不能保证找到所有�
 
 ## 截图
 
-以下截图使用合成样本，不包含真实采集记录。
+| 中文分析页 | 英文分析页 |
+|---|---|
+| ![分析页中文](captures/ui4_analysis_zh.png) | ![分析页英文](captures/ui4_analysis_en.png) |
 
-- [中文分析概览](docs/screenshots/analysis-zh.png)
-- [英文分析概览](docs/screenshots/analysis-en.png)
-- [英文诊断报告](docs/screenshots/report-en.png)
+更多截图：[首次使用引导](captures/ux4_live_onboarding_zh.png)、
+[通俗诊断](captures/ux4_plain_zh.png)、
+[技术证据](captures/ux4_technical_zh.png)。
 
 ## 系统要求
 
@@ -61,15 +67,18 @@ CPU、GPU、内存、呈现或数据质量问题，但不能保证找到所有�
 - ETW 采集需要管理员权限，或账号属于 **Performance Log Users** 组。
 - NVIDIA GPU 遥测是可选项，需要支持 NVML 的 NVIDIA 驱动。没有 NVML 时，
   其他功能仍可使用。
-- 运行此源码预览版需要 Python 3.12。
+- ZIP 版本不需要安装 Python。
 
 ## 安装与启动
 
-目前尚未发布 LagLens 的预编译 ZIP，请参照下方「从源码运行」。
-想直接体验分析页，可以用「打开 CSV」选择自带的合成样本
-`sample_capture.csv`，不用启动游戏或做 ETW 采集。
-只有实时采集或在本地构建 Windows 包时，才需要另行下载
-[PresentMon 命令行工具](vendor/presentmon/README.md)。
+1. 从 Release 页面下载 `LagLens-v0.1.0-win64.zip`。
+2. 把整个 ZIP 解压到普通可写文件夹，不要直接在 ZIP 内运行。
+3. 运行 `LagLens.exe`。
+4. 当前版本未签名，Windows SmartScreen 可能提示警告。运行前请核对
+   `BUILD_INFO.txt` 中的 SHA-256。
+
+ZIP 是自包含的 `onedir` 构建，包含 Python、Qt、PySide6、PresentMon 和
+许可证声明。它不会安装服务，也不会添加开机启动项。
 
 ## 进行一次游戏检测
 
@@ -133,7 +142,7 @@ PresentMon 可以输出两种时间戳模式：
 可以用 `LAGLENS_DATA_DIR` 指向其他可写文件夹，用于便携或测试。源码运行时
 抓取文件位于仓库的 `captures/` 目录，该目录已被 Git 忽略。
 
-LagLens 没有账号系统、云端同步或抓取上传，也不会发送遥测。报告使用抓取
+LagLens 没有账号系统、云端同步和抓取上传，也不会发送遥测。「网络」页在本机用 ICMP 测量默认网关和公网对照目标；公网探测不是游戏服务器延迟。可选的 AI 解读和 AI 助手只发送分析页显示的少量摘要和你的问题，不上传 CSV 或原始探测日志。设置中的 DeepSeek Key 保存在 Windows 凭据管理器，环境变量仅作为开发/测试回退。报告使用抓取
 文件名和目标进程名，不包含完整用户路径。抓取文件可能包含进程名、时序和
 可选硬件数据，请按敏感数据处理。
 
@@ -142,7 +151,7 @@ LagLens 没有账号系统、云端同步或抓取上传，也不会发送遥测
 需要 Windows、Python 3.12 和虚拟环境：
 
 ```powershell
-git clone https://github.com/zhangyuzheng728-netizen/LagLens-Public.git LagLens
+git clone <your-fork-or-repository-url>
 cd LagLens
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -157,7 +166,7 @@ py -3.12 -m venv .venv
 
 ## 构建 Windows 发布包
 
-把 [PresentMon 命令行工具](vendor/presentmon/README.md) 放到指定位置，再安装构建依赖并运行打包脚本：
+安装构建依赖并运行打包脚本：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
@@ -185,11 +194,12 @@ dist\LagLens-v0.1.0-win64.zip.sha256
 
 ## 已知限制
 
-- **长记录**：打开长记录时，分析页面可能明显变慢。约 14 万帧的记录上已观察到
-  这个问题。首次体验可以先用较短的记录。
+- **预发布验证**：打包版本已通过自动化和非提权界面检查，但最终版本仍需
+  一次全新的、管理员权限下的真实游戏 ETW 抓取作为发布阻断项。
 - ETW 采集需要管理员权限或 `Performance Log Users` 组成员资格；否则无法
   开始实时采集。
-- 实时采集预期使用 PresentMon 2.6.0。其他版本的 CSV 列和行为可能不同。
+- 内置 PresentMon 2.6.0。替换为其他 PresentMon 版本时，不保证 CSV 列和
+  行为完全一致。
 - QPC 模式是可选项，绝对映射依赖主机时钟；旧版 Relative CSV 仍是安全
   默认。
 - NVIDIA 遥测只覆盖受支持的 NVIDIA GPU。尚未实现 AMD/Intel GPU 遥测。
@@ -197,11 +207,11 @@ dist\LagLens-v0.1.0-win64.zip.sha256
 - 诊断是基于证据的线索，不是证明。VRR、覆盖层、多显示器 DPI、采集方式
   变化以及部分反作弊/ETW 限制尚未完整验证。
 - C-4 勾选状态仅限当前会话，不会写入报告，也不会在重启后恢复。
-- 没有网络诊断、自动 A/B 测试、云服务或 AI 分析。
+- 没有网络诊断、自动 A/B 测试或云服务。AI 解读是可选项，只发送本地摘要，不是诊断结论。
 
 ## 第三方组件与许可证
 
-LagLens 以 MIT License 分发；见 [LICENSE](LICENSE)。在本地构建的 Windows 包包含：
+LagLens 以 MIT License 分发；见 [LICENSE](LICENSE)。打包应用包含：
 
 - **Qt / PySide6 / shiboken6 6.12.0** — LGPL-3.0-only，按 LGPL 选项使用。
   Qt 库以独立、可替换的 DLL/插件形式分发。
